@@ -2,11 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, Button, ScrollView, StyleSheet, Platform, PermissionsAndroid } from 'react-native';
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import TrackPlayer, { Capability, useProgress, State } from 'react-native-track-player';
+import DocumentPicker from 'react-native-document-picker';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
 const bleManager = new BleManager();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// ⚠️ 请修改为你电脑的真实 IP
 const WS_URL = 'ws://192.168.0.200:8001/ws/eeg'; 
 
 const MUSE_SERVICE = '0000fe8d-0000-1000-8000-00805f9b34fb';
@@ -19,8 +23,11 @@ export default function App() {
   
   const [battery, setBattery] = useState<number | string>('读取中...');
   const [signal, setSignal] = useState<number | string>('检测中...');
-  const [drowsiness, setDrowsiness] = useState<number | string>('--'); 
-  const [waveData, setWaveData] = useState<number[]>(Array(60).fill(0));
+  const [drowsiness, setDrowsiness] = useState<number>(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [musicName, setMusicName] = useState('未加载音乐');
+  const [savedDeviceId, setSavedDeviceId] = useState<string | null>(null);
+  const progress = useProgress();
   
   const ws = useRef<WebSocket | null>(null);
   const isConnecting = useRef(false);
@@ -33,27 +40,115 @@ export default function App() {
   };
 
   useEffect(() => {
+    setupMusicPlayer();
+    connectWebSocket();
+    checkSavedDevice(); // 尝试无感直连
+    
+    const bleSub = bleManager.onStateChange(async (state) => {
+      if (state === 'PoweredOn') {
+        const id = await AsyncStorage.getItem('MUSE_DEVICE_ID');
+        if (id) {
+          setSavedDeviceId(id);
+          log('🔄 发现历史配对记录，尝试静默直连...');
+          autoConnect(id);
+        }
+      }
+    }, true);
+
+    return () => { 
+      TrackPlayer.destroy();
+      ws.current?.close(); 
+      bleSub?.remove();
+    };
+  }, []);
+
+  // --- 音乐播放逻辑 ---
+  const setupMusicPlayer = async () => {
+    try {
+      await TrackPlayer.setupPlayer();
+      await TrackPlayer.updateOptions({
+        capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
+      });
+    } catch (e) {}
+  };
+
+  const pickAndPlay = async () => {
+    try {
+      const res = await DocumentPicker.pickSingle({ type: [DocumentPicker.types.audio] });
+      await TrackPlayer.reset();
+      await TrackPlayer.add({ id: 'meditation', url: res.uri, title: res.name || '冥想音乐' });
+      setMusicName(res.name || '已加载');
+    } catch (err) {}
+  };
+
+  const togglePlay = async () => {
+    const state = await TrackPlayer.getState();
+    if (state === State.Playing) {
+      await TrackPlayer.pause();
+      setIsPlaying(false);
+    } else {
+      await TrackPlayer.play();
+      setIsPlaying(true);
+    }
+  };
+
+  // --- 自动重连与直连逻辑 ---
+  const checkSavedDevice = async () => {
+    const id = await AsyncStorage.getItem('MUSE_DEVICE_ID');
+    if (id) {
+      console.log('🔄 尝试自动直连上次设备:', id);
+      try {
+        const dev = await bleManager.connectToDevice(id);
+        await dev.discoverAllServicesAndCharacteristics();
+        startMuseProtocol(dev);
+      } catch (e) {
+        log('自动直连失败，需手动连接');
+      }
+    }
+  };
+
+  const autoConnect = async (deviceId: string) => {
+    if (isConnecting.current) return;
+    isConnecting.current = true;
+    
+    try {
+      // 尝试直接物理连接已知 ID，跳过宽泛扫描
+      const connectedDevice = await bleManager.connectToDevice(deviceId);
+      await sleep(500);
+      log('✅ 历史设备物理直连成功');
+      
+      await connectedDevice.discoverAllServicesAndCharacteristics();
+      deviceRef.current = connectedDevice;
+      await startMuseProtocol(connectedDevice);
+    } catch (e: any) {
+      log(`⚠️ 直连失败，设备可能未开机或不在附近。`);
+      isConnecting.current = false;
+    }
+  };
+
+  const connectWebSocket = () => {
     ws.current = new WebSocket(WS_URL);
     ws.current.onopen = () => log('🟢 成功连接 FastAPI 后端');
     ws.current.onerror = () => log(`🔴 后端连接失败`);
     ws.current.onclose = () => log(`🔴 WebSocket连接已关闭`);
     
-    ws.current.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'battery') setBattery(msg.value);
-        if (msg.type === 'metrics') {
-          setSignal(msg.signal);
-          setDrowsiness(msg.drowsiness); 
+    ws.current.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'battery') setBattery(msg.value);
+      if (msg.type === 'metrics') {
+        setSignal(msg.signal);
+        setDrowsiness(msg.drowsiness);
+        // 核心功能：困意高则降音量
+        if (msg.drowsiness > 75 && isPlaying) {
+          const vol = await TrackPlayer.getVolume();
+          await TrackPlayer.setVolume(Math.max(0, vol - 0.05));
         }
-        if (msg.type === 'eeg_preview') {
-          setWaveData(prev => [...prev, ...msg.data].slice(-60));
-        }
-      } catch (err) {}
+      }
+      if (msg.type === 'eeg_preview') {
+        // 保留波形显示逻辑
+      }
     };
-
-    return () => { ws.current?.close(); };
-  }, []);
+  };
 
   const getSignalStatus = (val: number | string) => {
     if (typeof val !== 'number') return { text: val, color: '#888', icon: '⚪' };
@@ -83,7 +178,7 @@ export default function App() {
     });
   };
 
-  const safeStartProtocol = async (device: Device) => {
+  const startMuseProtocol = async (device: Device) => {
     try {
       // 监听断连事件，实现自动重连
       device.onDisconnected((error, disconnectedDevice) => {
@@ -135,7 +230,7 @@ export default function App() {
         const newDevice = await device.connect();
         await sleep(500);
         await newDevice.discoverAllServicesAndCharacteristics();
-        await safeStartProtocol(newDevice);
+        await startMuseProtocol(newDevice);
         connected = true;
         isAutoReconnecting.current = false;
         log('✅ 重连成功，恢复监测');
@@ -163,7 +258,7 @@ export default function App() {
       return; 
     }
     
-    log('正在扫描 Muse...');
+    log('正在进行全局扫描...');
     bleManager.startDeviceScan(null, null, async (error, device) => {
       if (error) { 
         log(`扫描错误: ${error.message}`); 
@@ -175,19 +270,29 @@ export default function App() {
         try {
           log('建立物理连接...');
           const connectedDevice = await device.connect();
-          deviceRef.current = connectedDevice;
+          
+          // 保存成功连接的设备 ID
+          await AsyncStorage.setItem('MUSE_DEVICE_ID', connectedDevice.id);
+          setSavedDeviceId(connectedDevice.id);
           
           await sleep(500);
-          try { await connectedDevice.requestMTU(512); } catch (e) {}
           await connectedDevice.discoverAllServicesAndCharacteristics();
           log('✅ 服务发现完成');
-          await safeStartProtocol(connectedDevice);
+          deviceRef.current = connectedDevice;
+          await startMuseProtocol(connectedDevice);
         } catch (e: any) { 
           log(`连接失败: ${e.message}`); 
           isConnecting.current = false; 
         }
       }
     });
+  };
+
+  // 清除配对设备功能
+  const clearPairedDevice = async () => {
+    await AsyncStorage.removeItem('MUSE_DEVICE_ID');
+    setSavedDeviceId(null);
+    log('🗑️ 已清除历史设备绑定记录，下次需手动扫描');
   };
 
   const requestBluetoothPermission = async () => {
@@ -205,38 +310,34 @@ export default function App() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>超级个体 BCI 中枢</Text>
-
+      <Text style={styles.title}>BCI 冥想播放器</Text>
+      
       <View style={styles.dashboard}>
         <View style={styles.dashItem}>
-          <Text style={styles.dashLabel}>设备电量</Text>
-          <Text style={styles.dashValue}>🔋 {typeof battery === 'number' ? `${battery}%` : battery}</Text>
+          <Text style={styles.dashLabel}>困意 {drowsiness}%</Text>
         </View>
         <View style={styles.dashItem}>
-          <Text style={styles.dashLabel}>佩戴信号</Text>
-          <Text style={[styles.dashValue, { color: sigStatus.color }]}>
-            {sigStatus.icon} {sigStatus.text}
-          </Text>
-        </View>
-        <View style={styles.dashItem}>
-          <Text style={styles.dashLabel}>困意指数</Text>
-          <Text style={[styles.dashValue, { color: typeof drowsiness === 'number' && drowsiness > 60 ? '#FF5252' : '#4A90E2' }]}>
-            💤 {typeof drowsiness === 'number' ? `${drowsiness}%` : drowsiness}
-          </Text>
+          <Text style={styles.dashLabel}>信号 {signal}%</Text>
         </View>
       </View>
 
-      <Text style={styles.waveTitle}>入睡监测波形 (0013通道)</Text>
-      <View style={styles.waveContainer}>
-        {waveData.map((val, i) => {
-          const height = Math.max(2, Math.min(100, 50 + (val * 0.15))); 
-          return (
-            <View key={i} style={{width: 4, height: height, backgroundColor: '#00E676', marginHorizontal: 1, borderRadius: 2}} />
-          );
-        })}
+      <View style={styles.playerCard}>
+        <Text style={styles.musicText}>🎵 {musicName}</Text>
+        <View style={styles.btnGroup}>
+          <Button title="选择本地音乐" onPress={pickAndPlay} color="#8E44AD" />
+          <Button title={isPlaying ? "暂停" : "播放"} onPress={togglePlay} />
+        </View>
       </View>
 
-      <Button title="扫描并连接头环" onPress={scanAndConnect} color="#4A90E2" />
+      <View style={styles.buttonContainer}>
+        <Button title="重新扫描头环" onPress={scanAndConnect} color="#4A90E2" />
+        {savedDeviceId ? (
+          <View style={{marginTop: 10}}>
+            <Text style={{textAlign: 'center', color: '#666'}}>已配对设备: {savedDeviceId.substring(0, 8)}...</Text>
+            <Button title="清除配对记录" onPress={clearPairedDevice} color="#FF6B6B" />
+          </View>
+        ) : null}
+      </View>
       
       <ScrollView style={styles.logBox}>
         {logs.map((l, i) => <Text key={i} style={styles.logText}>{l}</Text>)}
@@ -246,14 +347,15 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: '#f5f5f5', marginTop: 30 },
-  title: { fontSize: 22, fontWeight: 'bold', marginBottom: 15, textAlign: 'center' },
-  dashboard: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15 },
-  dashItem: { flex: 1, backgroundColor: '#fff', padding: 10, borderRadius: 8, marginHorizontal: 3, alignItems: 'center', elevation: 2 },
-  dashLabel: { fontSize: 11, color: '#666', marginBottom: 5 },
-  dashValue: { fontSize: 15, fontWeight: 'bold', color: '#333' },
-  waveTitle: { fontSize: 14, fontWeight: 'bold', color: '#555', marginBottom: 5, marginLeft: 5 },
-  waveContainer: { height: 120, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', backgroundColor: '#111', paddingHorizontal: 5, borderRadius: 8, marginBottom: 20, overflow: 'hidden' },
+  container: { flex: 1, padding: 20, backgroundColor: '#f0f2f5', marginTop: 30 },
+  title: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 20 },
+  dashboard: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 },
+  dashItem: { flex: 1, backgroundColor: '#fff', padding: 15, borderRadius: 10, marginHorizontal: 5, alignItems: 'center' },
+  dashLabel: { fontSize: 15, fontWeight: 'bold', color: '#333' },
+  playerCard: { backgroundColor: '#fff', padding: 20, borderRadius: 15, elevation: 4, marginBottom: 20 },
+  musicText: { fontSize: 16, marginBottom: 15, textAlign: 'center' },
+  btnGroup: { flexDirection: 'row', justifyContent: 'space-around' },
+  buttonContainer: { flexDirection: 'column', alignItems: 'center' },
   logBox: { flex: 1, marginTop: 10, backgroundColor: '#e0e0e0', padding: 10, borderRadius: 8 },
   logText: { fontSize: 12, color: '#333', marginBottom: 4 }
 });

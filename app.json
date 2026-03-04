@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "MuseApp",
-    "slug": "MuseApp",
+    "slug": "muse-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -16,8 +16,19 @@
         "react-native-ble-plx",
         {
           "isBackgroundEnabled": true,
-          "modes": ["peripheral", "central"],
+          "modes": [
+            "peripheral",
+            "central"
+          ],
           "bluetoothAlwaysPermission": "Allow MuseApp to connect to your Muse headset."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "1.8.10"
+          }
         }
       ]
     ],
@@ -33,18 +44,27 @@
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [
+        "BLUETOOTH",
+        "BLUETOOTH_ADMIN",
+        "BLUETOOTH_SCAN",
+        "BLUETOOTH_CONNECT",
+        "ACCESS_FINE_LOCATION",
+        "FOREGROUND_SERVICE",
+        "WAKE_LOCK",
         "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT"
       ],
-      "package": "com.anonymous.MuseApp"
+      "package": "com.yourname.museapp"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "extra": {
       "eas": {
-        "projectId": "2ccc64ce-e58e-435c-8a60-f018c4334436"
+        "projectId": "95bd5f27-e1be-4d09-9475-469b45e0ea5f"
       }
-    }
+    },
+    "owner": "860516432"
   }
 }

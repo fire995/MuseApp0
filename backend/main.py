@@ -10,89 +10,117 @@ import uvicorn
 
 app = FastAPI()
 
-# 核心缓存与目录
 channel_buffers = {'0013': []}
 ctrl_buffer = ""
 DATA_DIR = "sleep_logs"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 def log_to_csv(sig_q, drowsy):
-    """【新增】数据自动落盘，第二天复盘核心依据"""
+    """自动落盘进程"""
     today = datetime.now().strftime("%Y-%m-%d")
     path = os.path.join(DATA_DIR, f"sleep_{today}.csv")
     exists = os.path.exists(path)
-    with open(path, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not exists: writer.writerow(["Time", "Signal", "Drowsiness"])
-        writer.writerow([datetime.now().strftime("%H:%M:%S"), sig_q, drowsy])
+    try:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not exists: writer.writerow(["Time", "Signal", "Drowsiness"])
+            writer.writerow([datetime.now().strftime("%H:%M:%S"), sig_q, drowsy])
+    except Exception:
+        pass
 
-def calculate_metrics_refined(data):
-    """【参考 amused-py 优化】科学计算信号与困意"""
+# remove the decode_eeg_universal function as we'll integrate its logic directly
+
+def calculate_metrics(data):
     if len(data) < 256: return 0, 0
-    
-    # 1. 信号质量 (基于方差与饱和度检测)
+    # 信号质量评估
     std = np.std(data)
-    amp = np.max(data) - np.min(data)
-    if std < 1 or std > 400 or amp < 2: sig_q = 5 # 极差/脱落
-    elif std > 150: sig_q = 40 # 接触一般
+    max_v = np.max(data)
+    min_v = np.min(data)
+    if std < 1 or std > 400 or (max_v - min_v) < 2: sig_q = 5
+    elif std > 150: sig_q = 40
     else: sig_q = 100
     
-    # 2. 困意指数 (学术标准公式: (Theta + Alpha) / Beta)
-    fft_vals = np.absolute(np.fft.rfft(data))
-    fft_freqs = np.fft.rfftfreq(len(data), 1.0/256)
+    # 困倦度计算: (Theta + Alpha) / Beta 功率比
+    fft = np.absolute(np.fft.rfft(data))
+    freqs = np.fft.rfftfreq(len(data), 1.0/256)
     
-    def band_pwr(f1, f2):
-        idx = np.where((fft_freqs >= f1) & (fft_freqs <= f2))[0]
-        return np.sum(fft_vals[idx]) if len(idx) > 0 else 0.01
-
-    t, a, b = band_pwr(4, 8), band_pwr(8, 13), band_pwr(13, 30)
-    # 比值越高 = 大脑越放松/困倦
-    ratio = (t + a) / b
-    # 归一化映射：将 ratio 从 1.2-5.0 映射到 0-100%
-    drowsy = int(max(0, min(100, ((ratio - 1.2) / 3.8) * 100)))
+    def pwr(f1, f2): 
+        idx = np.where((freqs >= f1) & (freqs <= f2))[0]
+        return np.sum(fft[idx]) if len(idx) > 0 else 0.001
     
-    return int(sig_q), drowsy
+    ratio = (pwr(4, 8) + pwr(8, 13)) / pwr(13, 30)
+    drowsiness = int(max(0, min(100, (ratio - 1.2) / 3.8 * 100)))
+    
+    return sig_q, drowsiness
 
 @app.websocket("/ws/eeg")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     global ctrl_buffer
-    print("🟢 [后端] 睡眠监测引擎已启动，数据落盘守护中...")
+    print("🟢 [后端] 链路激活，数据落盘守护进程已启动...")
+    
     try:
         while True:
             try:
-                msg = await websocket.receive_text()
-                pkt = json.loads(msg)
-                chan, b64 = pkt.get("channel"), pkt.get("data", "")
-                
-                # 电量正则解析 (防分包)
-                if chan == "0001":
-                    ctrl_buffer += base64.b64decode(b64).decode('utf-8','ignore')
-                    m = re.search(r'"bp":\s*(\d+)', ctrl_buffer)
-                    if m:
-                        await websocket.send_json({"type": "battery", "value": int(m.group(1))})
-                        ctrl_buffer = ""
+                raw_payload = await websocket.receive_text()
+                try:
+                    packet = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    continue
+                    
+                channel = packet.get("channel", "unknown")
+                data_b64 = packet.get("data", "")
 
-                # 脑电解析与指标计算
-                elif chan == "0013":
-                    raw = base64.b64decode(b64)
-                    if len(raw) >= 20:
-                        samples = []
-                        for i in range(2, 20-2, 3):
-                            b1,b2,b3 = raw[i], raw[i+1], raw[i+2]
-                            samples.append(round(((b1<<4)|(b2>>4) - 2048)*0.475, 2))
-                            samples.append(round((((b2&0x0F)<<8)|b3 - 2048)*0.475, 2))
-                        
+                if channel == "0001":
+                    chunk = base64.b64decode(data_b64).decode('utf-8', errors='ignore')
+                    ctrl_buffer += chunk
+                    match = re.search(r'"bp":\s*(\d+)', ctrl_buffer)
+                    if match:
+                        await websocket.send_json({"type": "battery", "value": int(match.group(1))})
+                        ctrl_buffer = ""
+                    if len(ctrl_buffer) > 1000: ctrl_buffer = ctrl_buffer[-500:]
+
+                elif channel == "0013":
+                    raw = base64.b64decode(data_b64)
+                    # 解析20字节数据块中的EEG样本
+                    samples = []
+                    # Process up to 20 bytes (one packet) with proper bounds checking
+                    end_idx = min(20, len(raw) - 2)
+                    for i in range(2, end_idx, 3):
+                        if i + 2 >= len(raw): break
+                        b1, b2, b3 = raw[i], raw[i+1], raw[i+2]
+                        # 解包两个样本值
+                        val1 = (b1 << 4) | (b2 >> 4)
+                        val2 = ((b2 & 0x0F) << 8) | b3
+                        samples.append(round((val1 - 2048) * 0.475, 2))
+                        samples.append(round((val2 - 2048) * 0.475, 2))
+                    
+                    if samples: 
                         channel_buffers['0013'].extend(samples)
+                        # 当收集到足够的数据时进行处理
                         if len(channel_buffers['0013']) >= 256:
-                            q, d = calculate_metrics_refined(channel_buffers['0013'][:256])
-                            log_to_csv(q, d) # 实时落盘
-                            await websocket.send_json({"type": "metrics", "signal": q, "drowsiness": d})
+                            window = channel_buffers['0013'][:256]
+                            q, d = calculate_metrics(window)
+                            log_to_csv(q, d)
+                            
+                            await websocket.send_json({
+                                "type": "metrics", 
+                                "signal": q, 
+                                "drowsiness": d
+                            })
                             channel_buffers['0013'] = channel_buffers['0013'][256:]
-                        
-                        await websocket.send_json({"type": "eeg_preview", "data": samples[::2]})
-            except Exception: continue
-    except WebSocketDisconnect: print("🔴 链路挂起")
+
+                        # 发送预览数据用于可视化
+                        mean_v = sum(samples) / len(samples)
+                        await websocket.send_json({
+                            "type": "eeg_preview", 
+                            "data": [round(v - mean_v, 2) for v in samples[::2]]
+                        })
+            except Exception as e:
+                print(f"Error processing message: {e}")
+                continue  # 静默处理异常，保持连接
+    except WebSocketDisconnect:
+        pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)
