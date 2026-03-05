@@ -1,364 +1,629 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, Button, ScrollView, StyleSheet, Platform, PermissionsAndroid } from 'react-native';
+import {
+  View, Text, ScrollView, StyleSheet, Platform,
+  PermissionsAndroid, TouchableOpacity, Dimensions,
+} from 'react-native';
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import TrackPlayer, { Capability, useProgress, State } from 'react-native-track-player';
-import DocumentPicker from '@react-native-documents/picker';
-
-// 添加调试日志
-console.log("TrackPlayer Module:", TrackPlayer); 
+import TrackPlayer, { Capability, AppKilledPlaybackBehavior } from 'react-native-track-player';
+import * as DocumentPicker from '@react-native-documents/picker';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
+
 const bleManager = new BleManager();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const WS_URL    = 'ws://192.168.0.200:8001/ws/eeg';
+const SCREEN_W  = Dimensions.get('window').width - 56;
 
-// ⚠️ 请修改为你电脑的真实 IP
-const WS_URL = 'ws://192.168.0.200:8001/ws/eeg'; 
+const MUSE_SERVICE    = '0000fe8d-0000-1000-8000-00805f9b34fb';
+const MUSE_CONTROL    = '273e0001-4c4d-454d-96be-f03bac821358';
+const ATHENA_CHANNELS = ['273e0013', '273e0014', '273e0015', '273e0016', '273e0017']
+  .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
 
-const MUSE_SERVICE = '0000fe8d-0000-1000-8000-00805f9b34fb';
-const MUSE_CONTROL = '273e0001-4c4d-454d-96be-f03bac821358';
-const ATHENA_CHANNELS = ['273e0013', '273e0014', '273e0015'].map(id => `${id}-4c4d-454d-96be-f03bac821358`);
+const BANDS = [
+  { key: 'delta', label: 'Delta', range: '0.5–4Hz',  color: '#6C5CE7', note: '深睡' },
+  { key: 'theta', label: 'Theta', range: '4–8Hz',    color: '#00B894', note: '困倦' },
+  { key: 'alpha', label: 'Alpha', range: '8–13Hz',   color: '#0984E3', note: '放松' },
+  { key: 'beta',  label: 'Beta',  range: '13–30Hz',  color: '#FDCB6E', note: '专注' },
+];
+type BandPowers = { delta: number; theta: number; alpha: number; beta: number };
+
+// ── 模拟数据 ──────────────────────────────────────────────────
+let mockPhase = 0;
+const generateMockData = () => {
+  mockPhase += 0.04;
+  const delta = Math.max(5, Math.min(95, 30 + Math.sin(mockPhase * 0.7) * 20 + Math.random() * 8));
+  const theta = Math.max(5, Math.min(95, 45 + Math.sin(mockPhase + 1) * 25   + Math.random() * 8));
+  const alpha = Math.max(5, Math.min(95, 55 + Math.sin(mockPhase * 1.3) * 20 + Math.random() * 8));
+  const beta  = Math.max(5, Math.min(95, 35 + Math.sin(mockPhase * 0.5 + 2) * 15 + Math.random() * 8));
+  const total = delta + theta + alpha + beta;
+  return {
+    bands: {
+      delta: Math.round(delta / total * 100),
+      theta: Math.round(theta / total * 100),
+      alpha: Math.round(alpha / total * 100),
+      beta:  Math.round(beta  / total * 100),
+    },
+    drowsiness: Math.max(0, Math.min(100, Math.round(50 + Math.sin(mockPhase * 0.4) * 35))),
+    signal: 85 + Math.round(Math.random() * 12),
+  };
+};
+
+const signalColor = (v: number | string) =>
+  typeof v !== 'number' ? '#888' : v >= 70 ? '#00E676' : v >= 40 ? '#FFCA28' : '#FF5252';
+const signalLabel = (v: number | string) =>
+  typeof v !== 'number' ? '检测中…'
+  : v >= 70 ? '信号良好'
+  : v >= 40 ? '信号一般 – 调整头环'
+  : '信号差 – 请重新佩戴';
 
 export default function App() {
-  const [status, setStatus] = useState('等待操作...');
-  const [logs, setLogs] = useState<string[]>([]);
-  
-  const [battery, setBattery] = useState<number | string>('读取中...');
-  const [signal, setSignal] = useState<number | string>('检测中...');
-  const [drowsiness, setDrowsiness] = useState<number>(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [musicName, setMusicName] = useState('未加载音乐');
+  const [logs,          setLogs]          = useState<string[]>([]);
+  const [battery,       setBattery]       = useState<number | string>('--');
+  const [signal,        setSignal]        = useState<number | string>('检测中...');
+  const [drowsiness,    setDrowsiness]    = useState<number>(0);
+  const [bandPowers,    setBandPowers]    = useState<BandPowers>({ delta:25, theta:25, alpha:25, beta:25 });
+  const [drowHistory,   setDrowHistory]   = useState<number[]>(new Array(40).fill(0));
+  const [eegWave,       setEegWave]       = useState<number[]>(new Array(30).fill(0));
+  const [isPlaying,     setIsPlaying]     = useState(false);
+  const [musicName,     setMusicName]     = useState('未加载音乐');
   const [savedDeviceId, setSavedDeviceId] = useState<string | null>(null);
-  const progress = useProgress();
-  
-  const ws = useRef<WebSocket | null>(null);
+  const [mockMode,      setMockMode]      = useState(false);
+  const [packetsRx,     setPacketsRx]     = useState(0);
+  const [isSaving,      setIsSaving]      = useState(false);
+  const [savePath,      setSavePath]      = useState('');
+
+  const ws           = useRef<WebSocket | null>(null);
   const isConnecting = useRef(false);
-  const isAutoReconnecting = useRef(false);
-  const deviceRef = useRef<Device | null>(null);
+  const isAutoRecon  = useRef(false);
+  const deviceRef    = useRef<Device | null>(null);
+  const heartbeat    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mockTimer    = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const log = (msg: string) => {
-    setLogs(prev => [msg, ...prev].slice(0, 15));
-    setStatus(msg);
+    console.log(msg);
+    setLogs(prev => [msg, ...prev].slice(0, 30));
+  };
+
+  const pushDrowsiness = (d: number) => {
+    setDrowsiness(d);
+    setDrowHistory(prev => [...prev.slice(1), d]);
   };
 
   useEffect(() => {
     setupMusicPlayer();
     connectWebSocket();
-    checkSavedDevice(); // 尝试无感直连
-    
-    const bleSub = bleManager.onStateChange(async (state) => {
-      if (state === 'PoweredOn') {
-        const id = await AsyncStorage.getItem('MUSE_DEVICE_ID');
-        if (id) {
-          setSavedDeviceId(id);
-          log('🔄 发现历史配对记录，尝试静默直连...');
-          autoConnect(id);
-        }
-      }
-    }, true);
-
-    return () => { 
-      TrackPlayer.destroy();
-      ws.current?.close(); 
-      bleSub?.remove();
+    checkSavedDevice();
+    return () => {
+      ws.current?.close();
+      if (heartbeat.current) clearInterval(heartbeat.current);
+      if (mockTimer.current) clearInterval(mockTimer.current);
     };
   }, []);
 
-  // --- 音乐播放逻辑 ---
+  // ── 模拟数据 ───────────────────────────────────────────────
+  const toggleMock = () => {
+    if (mockMode) {
+      setMockMode(false);
+      if (mockTimer.current) { clearInterval(mockTimer.current); mockTimer.current = null; }
+      log('⏹ 模拟模式已停止');
+    } else {
+      setMockMode(true);
+      log('🧪 模拟模式已开启 – 仅供 UI 调试');
+      mockTimer.current = setInterval(() => {
+        const { bands, drowsiness: d, signal: s } = generateMockData();
+        setBandPowers(bands);
+        pushDrowsiness(d);
+        setSignal(s);
+      }, 500);
+    }
+  };
+
+  // ── 原始数据保存开关 ────────────────────────────────────────
+  const toggleSave = () => {
+    const newState = !isSaving;
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify({ type: 'settings', save_raw: newState }));
+      log(newState ? '💾 已请求开启原始数据保存' : '⏹ 已请求停止保存');
+    } else {
+      log('⚠️ 后端未连接，无法切换保存状态');
+    }
+  };
+
+  // ── 音乐播放器 ──────────────────────────────────────────────
   const setupMusicPlayer = async () => {
     try {
       await TrackPlayer.setupPlayer();
       await TrackPlayer.updateOptions({
+        android: { appKilledPlaybackBehavior: AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification },
         capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
+        compactCapabilities: [Capability.Play, Capability.Pause],
       });
-    } catch (e) {}
+      log('✅ 音频引擎初始化成功');
+    } catch { log('音频引擎已就绪'); }
   };
 
   const pickAndPlay = async () => {
     try {
-      const res = await DocumentPicker.pickSingle({ type: [DocumentPicker.types.audio] });
-      await TrackPlayer.reset();
-      await TrackPlayer.add({ id: 'meditation', url: res.uri, title: res.name || '冥想音乐' });
-      setMusicName(res.name || '已加载');
-    } catch (err) {}
+      const results = await DocumentPicker.pick({ type: [DocumentPicker.types.audio] });
+      if (results?.length > 0) {
+        const res = results[0];
+        await TrackPlayer.reset();
+        await TrackPlayer.add({ id: 'meditation', url: res.uri, title: res.name || '冥想音乐', artist: 'MuseApp' });
+        setMusicName(res.name || '已加载');
+        await TrackPlayer.play();
+        setIsPlaying(true);
+        log(`▶️ 开始播放: ${res.name}`);
+      }
+    } catch (err) { if (!DocumentPicker.isCancel(err)) log(`❌ 选择音乐失败: ${err}`); }
   };
 
   const togglePlay = async () => {
-    const state = await TrackPlayer.getState();
-    if (state === State.Playing) {
-      await TrackPlayer.pause();
-      setIsPlaying(false);
-    } else {
-      await TrackPlayer.play();
-      setIsPlaying(true);
-    }
-  };
-
-  // --- 自动重连与直连逻辑 ---
-  const checkSavedDevice = async () => {
-    const id = await AsyncStorage.getItem('MUSE_DEVICE_ID');
-    if (id) {
-      console.log('🔄 尝试自动直连上次设备:', id);
-      try {
-        const dev = await bleManager.connectToDevice(id);
-        await dev.discoverAllServicesAndCharacteristics();
-        startMuseProtocol(dev);
-      } catch (e) {
-        log('自动直连失败，需手动连接');
-      }
-    }
-  };
-
-  const autoConnect = async (deviceId: string) => {
-    if (isConnecting.current) return;
-    isConnecting.current = true;
-    
     try {
-      // 尝试直接物理连接已知 ID，跳过宽泛扫描
-      const connectedDevice = await bleManager.connectToDevice(deviceId);
-      await sleep(500);
-      log('✅ 历史设备物理直连成功');
-      
-      await connectedDevice.discoverAllServicesAndCharacteristics();
-      deviceRef.current = connectedDevice;
-      await startMuseProtocol(connectedDevice);
-    } catch (e: any) {
-      log(`⚠️ 直连失败，设备可能未开机或不在附近。`);
-      isConnecting.current = false;
-    }
+      if (isPlaying) { await TrackPlayer.pause(); setIsPlaying(false); log('⏸️ 音乐已暂停'); }
+      else           { await TrackPlayer.play();  setIsPlaying(true);  log('▶️ 音乐继续播放'); }
+    } catch (e) { log(`❌ 播放控制失败: ${e}`); }
   };
 
+  // ── WebSocket ───────────────────────────────────────────────
   const connectWebSocket = () => {
     ws.current = new WebSocket(WS_URL);
-    ws.current.onopen = () => log('🟢 成功连接 FastAPI 后端');
-    ws.current.onerror = () => log(`🔴 后端连接失败`);
-    ws.current.onclose = () => log(`🔴 WebSocket连接已关闭`);
-    
+    ws.current.onopen  = () => log('🟢 已连接 Python 后端');
+    ws.current.onerror = () => log('🔴 后端连接失败，请检查 IP');
+    ws.current.onclose = () => log('🔴 WebSocket 已关闭');
     ws.current.onmessage = async (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'battery') setBattery(msg.value);
-      if (msg.type === 'metrics') {
-        setSignal(msg.signal);
-        setDrowsiness(msg.drowsiness);
-        // 核心功能：困意高则降音量
-        if (msg.drowsiness > 75 && isPlaying) {
-          const vol = await TrackPlayer.getVolume();
-          await TrackPlayer.setVolume(Math.max(0, vol - 0.05));
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'battery') {
+          setBattery(msg.value);
         }
-      }
-      if (msg.type === 'eeg_preview') {
-        // 保留波形显示逻辑
-      }
+        if (msg.type === 'metrics') {
+          setSignal(msg.signal);
+          pushDrowsiness(msg.drowsiness);
+          if (msg.bands) setBandPowers(msg.bands);
+          if (typeof msg.packets_rx === 'number') setPacketsRx(msg.packets_rx);
+          // 困意 > 75 时自动降低音量
+          if (msg.drowsiness > 75 && isPlaying) {
+            const vol = await TrackPlayer.getVolume();
+            if (vol > 0) await TrackPlayer.setVolume(Math.max(0, vol - 0.05));
+          }
+        }
+        if (msg.type === 'eeg_preview') {
+          setEegWave(prev => [...prev, ...(msg.data || [])].slice(-60));
+        }
+        if (msg.type === 'data_status') {
+          setPacketsRx(msg.packets || 0);
+        }
+        if (msg.type === 'save_status') {
+          setIsSaving(msg.saving);
+          if (msg.path) setSavePath(msg.path);
+          log(msg.saving ? `💾 正在保存: ${msg.path}` : '⏹ 保存已停止');
+        }
+      } catch {}
     };
   };
 
-  const getSignalStatus = (val: number | string) => {
-    if (typeof val !== 'number') return { text: val, color: '#888', icon: '⚪' };
-    if (val >= 80) return { text: `${val}% (极佳)`, color: '#00E676', icon: '🟢' };
-    if (val >= 40) return { text: `${val}% (一般)`, color: '#FFCA28', icon: '🟡' };
-    return { text: `${val}% (差)`, color: '#F44336', icon: '🔴' };
-  };
-
-  const sendCommand = async (device: Device, base64: string, name: string) => {
-    return new Promise<void>(async (resolve) => {
-      let resolved = false;
-      let buffer = "";
-      const sub = device.monitorCharacteristicForService(MUSE_SERVICE, MUSE_CONTROL, (err, char) => {
-        if (err || resolved) return;
-        if (char?.value) {
-          buffer += Buffer.from(char.value, 'base64').toString();
-          if (buffer.includes('}') && buffer.includes('"rc":0')) {
-            log(`✅ ${name} 成功`);
-            resolved = true; 
-            sub.remove(); 
-            resolve();
-          }
-        }
-      });
-      await device.writeCharacteristicWithoutResponseForService(MUSE_SERVICE, MUSE_CONTROL, base64);
-      setTimeout(() => { if (!resolved) { sub.remove(); resolve(); } }, 2000);
-    });
-  };
+  // ─────────────────────────────────────────────────────────────
+  //  Muse BLE 协议（amused-py 逆向工程成果）
+  //
+  //  关键设计：只建立【一个】MUSE_CONTROL 持久监听器，同时处理:
+  //    - 命令应答（"rc":0）
+  //    - 电池通知（"bp":XX）
+  //  避免 react-native-ble-plx 对同一特征值多次订阅冲突
+  //
+  //  正确启动序列:
+  //    1. halt       AmgK           → \x02h\n
+  //    2. preset     BnAxMDM1Cg==  → \x06p1035\n  全传感器模式
+  //    3. 订阅 EEG 数据通道（0013-0017）
+  //    4. dc001 × 2  BmRjMDAxCg==  → \x06dc001\n  ⚠️ 必须发两次！
+  //    5. 心跳       AnMK           → \x02s\n      每 30 秒保活
+  // ─────────────────────────────────────────────────────────────
+  const write = (device: Device, cmd: string) =>
+    device.writeCharacteristicWithoutResponseForService(
+      MUSE_SERVICE, MUSE_CONTROL, cmd
+    ).catch(() => {});
 
   const startMuseProtocol = async (device: Device) => {
     try {
-      // 监听断连事件，实现自动重连
-      device.onDisconnected((error, disconnectedDevice) => {
-        log('⚠️ 设备异常断开，正在尝试静默重连...');
-        if (!isAutoReconnecting.current) {
-          isAutoReconnecting.current = true;
-          reconnectLoop(disconnectedDevice);
+      device.onDisconnected(() => {
+        log('⚠️ 设备断开，重连中...');
+        if (!isAutoRecon.current) {
+          isAutoRecon.current = true;
+          reconnectLoop(device);
         }
       });
 
-      log('🛡️ 启动协议序列...');
-      [MUSE_CONTROL, ...ATHENA_CHANNELS].forEach(uuid => {
+      // ── 建立唯一的 MUSE_CONTROL 持久监听器 ──────────────
+      let cmdResolve: (() => void) | null = null;
+      let ctrlBuf = '';
+
+      device.monitorCharacteristicForService(MUSE_SERVICE, MUSE_CONTROL, (err, char) => {
+        if (!char?.value) return;
+        const txt = Buffer.from(char.value, 'base64').toString();
+        ctrlBuf += txt;
+
+        // 电池通知（定期推送）
+        const bpMatch = ctrlBuf.match(/"bp":\s*(\d+)/);
+        if (bpMatch) {
+          const bv = parseInt(bpMatch[1]);
+          setBattery(bv);
+          // 同步发给后端
+          if (ws.current?.readyState === WebSocket.OPEN) {
+            ws.current!.send(JSON.stringify({ channel: '0001', data: char.value }));
+          }
+          ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
+        }
+
+        // 命令应答
+        if (cmdResolve && ctrlBuf.includes('"rc":0')) {
+          cmdResolve();
+          cmdResolve = null;
+          ctrlBuf = ctrlBuf.replace(/"rc":0/, '');
+        }
+
+        // 防止缓冲区溢出
+        if (ctrlBuf.length > 500) ctrlBuf = ctrlBuf.slice(-200);
+      });
+
+      // 带超时的命令发送（等待 rc:0 或 2s 超时）
+      const sendCmd = (b64: string, label: string): Promise<void> =>
+        new Promise(resolve => {
+          cmdResolve = resolve;
+          write(device, b64);
+          setTimeout(() => { if (cmdResolve) { cmdResolve = null; resolve(); } }, 2000);
+          log(`🔧 ${label}...`);
+        });
+
+      // ── 启动序列 ──────────────────────────────────────────
+      await sendCmd('AmgK',          'halt');
+      await sendCmd('BnAxMDM1Cg==',  'preset p1035');
+
+      // ── 订阅 EEG 数据通道（不订阅 MUSE_CONTROL，已上方处理）
+      log('🛡️ 订阅 EEG 通道 (0013-0017)...');
+      ATHENA_CHANNELS.forEach(uuid => {
         device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (err, char) => {
-          if (char?.value && ws.current?.readyState === 1) {
-            ws.current!.send(JSON.stringify({ channel: uuid.substring(4,8), data: char.value }));
+          if (char?.value && ws.current?.readyState === WebSocket.OPEN) {
+            ws.current!.send(JSON.stringify({
+              channel: uuid.substring(4, 8),
+              data:    char.value,
+            }));
           }
         });
       });
 
-      await sendCommand(device, 'A3YxCg==', 'Version (v1)');
-      await sendCommand(device, 'AmgK', 'Halt (h)');
-      await sendCommand(device, 'BnAxMDM1Cg==', 'Preset (p1035)');
+      // ── dc001 × 2（关键！必须发两次才能触发数据流）─────
+      log('🔧 dc001 × 2（启动数据流）...');
+      await write(device, 'BmRjMDAxCg==');   // 第一次
+      await sleep(150);
+      await write(device, 'BmRjMDAxCg==');   // 第二次 ✅
 
-      log('🚀 发送激活脉冲...');
-      await device.writeCharacteristicWithoutResponseForService(MUSE_SERVICE, MUSE_CONTROL, 'BmRjMDAxCg==');
-      await sleep(100);
-      await device.writeCharacteristicWithoutResponseForService(MUSE_SERVICE, MUSE_CONTROL, 'A0wxCg==');
-      await sleep(200);
-      await device.writeCharacteristicWithoutResponseForService(MUSE_SERVICE, MUSE_CONTROL, 'BmRjMDAxCg==');
-      
-      log('🏁 序列完成，启动心跳守护...');
-      setTimeout(() => {
-        device.writeCharacteristicWithoutResponseForService(MUSE_SERVICE, MUSE_CONTROL, 'AnMK').catch(() => {});
-      }, 2000);
-      setInterval(() => {
-        device.writeCharacteristicWithoutResponseForService(MUSE_SERVICE, MUSE_CONTROL, 'AnMK').catch(() => {});
-      }, 30000);
+      log('🏁 数据流已启动');
 
-    } catch (e: any) { 
-      log(`❌ 协议初始化失败: ${e.message}`); 
-    }
+      // ── 心跳保活 ──────────────────────────────────────────
+      if (heartbeat.current) clearInterval(heartbeat.current);
+      setTimeout(() => write(device, 'AnMK'), 2000);
+      heartbeat.current = setInterval(() => write(device, 'AnMK'), 30000);
+
+    } catch (e: any) { log(`❌ 协议失败: ${e.message}`); }
   };
 
   const reconnectLoop = async (device: Device) => {
-    let connected = false;
-    while (!connected) {
+    while (true) {
       try {
-        log('🔄 重新扫描并尝试物理连接...');
-        const newDevice = await device.connect();
+        const d = await device.connect();
         await sleep(500);
-        await newDevice.discoverAllServicesAndCharacteristics();
-        await startMuseProtocol(newDevice);
-        connected = true;
-        isAutoReconnecting.current = false;
-        log('✅ 重连成功，恢复监测');
-      } catch (e) {
-        log('重连尝试失败，3秒后重试...');
-        await sleep(3000); // 3秒重试一次
-      }
+        await d.discoverAllServicesAndCharacteristics();
+        await startMuseProtocol(d);
+        isAutoRecon.current = false;
+        log('✅ 重连成功');
+        break;
+      } catch { await sleep(3000); }
     }
   };
 
   const scanAndConnect = async () => {
     if (isConnecting.current) return;
     isConnecting.current = true;
-    
     const state = await bleManager.state();
-    if (state !== 'PoweredOn') { 
-      log('蓝牙未开启'); 
-      isConnecting.current = false; 
-      return; 
-    }
-    
-    const hasPermission = await requestBluetoothPermission();
-    if (!hasPermission) { 
-      isConnecting.current = false; 
-      return; 
-    }
-    
-    log('正在进行全局扫描...');
-    bleManager.startDeviceScan(null, null, async (error, device) => {
-      if (error) { 
-        log(`扫描错误: ${error.message}`); 
-        isConnecting.current = false; 
-        return; 
-      }
-      if (device?.name?.includes('Muse')) {
-        bleManager.stopDeviceScan();
-        try {
-          log('建立物理连接...');
-          const connectedDevice = await device.connect();
-          
-          // 保存成功连接的设备 ID
-          await AsyncStorage.setItem('MUSE_DEVICE_ID', connectedDevice.id);
-          setSavedDeviceId(connectedDevice.id);
-          
-          await sleep(500);
-          await connectedDevice.discoverAllServicesAndCharacteristics();
-          log('✅ 服务发现完成');
-          deviceRef.current = connectedDevice;
-          await startMuseProtocol(connectedDevice);
-        } catch (e: any) { 
-          log(`连接失败: ${e.message}`); 
-          isConnecting.current = false; 
-        }
-      }
-    });
-  };
-
-  // 清除配对设备功能
-  const clearPairedDevice = async () => {
-    await AsyncStorage.removeItem('MUSE_DEVICE_ID');
-    setSavedDeviceId(null);
-    log('🗑️ 已清除历史设备绑定记录，下次需手动扫描');
-  };
-
-  const requestBluetoothPermission = async () => {
-    if (Platform.OS === 'android' && Platform.Version >= 31) {
-      const granted = await PermissionsAndroid.requestMultiple([
+    if (state !== 'PoweredOn') { log('❌ 蓝牙未开启'); isConnecting.current = false; return; }
+    if (Platform.OS === 'android') {
+      const g = await PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
       ]);
-      return granted['android.permission.BLUETOOTH_SCAN'] === PermissionsAndroid.RESULTS.GRANTED;
+      if (g['android.permission.BLUETOOTH_SCAN'] !== PermissionsAndroid.RESULTS.GRANTED) {
+        log('❌ 缺少蓝牙权限'); isConnecting.current = false; return;
+      }
     }
-    return true;
+    log('📡 扫描中...');
+    bleManager.startDeviceScan(null, null, async (error, device) => {
+      if (error) { log(`扫描错误: ${error.message}`); isConnecting.current = false; return; }
+      if (device?.name?.includes('Muse')) {
+        bleManager.stopDeviceScan();
+        try {
+          log(`🔗 发现 ${device.name}，连接中...`);
+          const d = await device.connect();
+          await AsyncStorage.setItem('MUSE_DEVICE_ID', d.id);
+          setSavedDeviceId(d.id);
+          await sleep(500);
+          await d.discoverAllServicesAndCharacteristics();
+          log('✅ BLE 握手完成');
+          deviceRef.current = d;
+          await startMuseProtocol(d);
+        } catch (e: any) { log(`❌ 连接失败: ${e.message}`); isConnecting.current = false; }
+      }
+    });
+    setTimeout(() => { bleManager.stopDeviceScan(); isConnecting.current = false; }, 10000);
   };
 
-  const sigStatus = getSignalStatus(signal);
+  const checkSavedDevice  = async () => { const id = await AsyncStorage.getItem('MUSE_DEVICE_ID'); if (id) setSavedDeviceId(id); };
+  const clearPairedDevice = async () => { await AsyncStorage.removeItem('MUSE_DEVICE_ID'); setSavedDeviceId(null); log('🗑️ 已清除绑定记录'); };
+
+  // ── EEG 原始波形 ────────────────────────────────────────────
+  const EEGWaveform = () => {
+    const W = SCREEN_W, H = 52, pad = 4;
+    if (eegWave.every(v => v === 0)) return (
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>〜 EEG 原始波形</Text>
+        <View style={{ height: H, justifyContent: 'center', alignItems: 'center' }}>
+          <Text style={{ color: '#444', fontSize: 12 }}>等待数据...</Text>
+        </View>
+      </View>
+    );
+    const pts = eegWave.slice(-50);
+    const mn  = Math.min(...pts), mx = Math.max(...pts);
+    const range = mx - mn || 1;
+    const xs = pts.map((_, i) => pad + (i / (pts.length - 1)) * (W - pad * 2));
+    const ys = pts.map(v => H - pad - ((v - mn) / range) * (H - pad * 2));
+    return (
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>〜 EEG 原始波形（TP9）</Text>
+        <View style={{ height: H, width: W }}>
+          {xs.map((x, i) => i === 0 ? null : (
+            <View key={i} style={{
+              position: 'absolute', left: xs[i - 1], top: Math.min(ys[i - 1], ys[i]) - 1,
+              width: Math.sqrt(Math.pow(x - xs[i-1], 2) + Math.pow(ys[i] - ys[i-1], 2)),
+              height: 2, backgroundColor: '#00B894', borderRadius: 1,
+              transform: [{ rotate: `${Math.atan2(ys[i] - ys[i-1], x - xs[i-1]) * 180 / Math.PI}deg` }],
+              transformOrigin: '0 50%',
+            }} />
+          ))}
+        </View>
+      </View>
+    );
+  };
+
+  // ── 困意趋势图 ──────────────────────────────────────────────
+  const DrowsinessChart = () => {
+    const W = SCREEN_W, H = 64, pad = 4;
+    const xs = drowHistory.map((_, i) => pad + (i / (drowHistory.length - 1)) * (W - pad * 2));
+    const ys = drowHistory.map(v => H - pad - (v / 100) * (H - pad * 2));
+    return (
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>📈 困意趋势（近 20 秒）</Text>
+        <View style={{ height: H, width: W }}>
+          {[0, 25, 50, 75, 100].map(v => (
+            <View key={v} style={[styles.gridLine, { top: H - pad - (v / 100) * (H - pad * 2) }]}>
+              <Text style={styles.gridLabel}>{v}</Text>
+            </View>
+          ))}
+          {xs.map((x, i) => i === 0 ? null : (
+            <View key={i} style={{
+              position: 'absolute', left: xs[i - 1], top: Math.min(ys[i - 1], ys[i]) - 1,
+              width: Math.sqrt(Math.pow(x - xs[i-1], 2) + Math.pow(ys[i] - ys[i-1], 2)),
+              height: 2.5, backgroundColor: '#E17055', borderRadius: 1,
+              transform: [{ rotate: `${Math.atan2(ys[i] - ys[i-1], x - xs[i-1]) * 180 / Math.PI}deg` }],
+              transformOrigin: '0 50%',
+            }} />
+          ))}
+          <View style={{
+            position: 'absolute', left: xs[xs.length - 1] - 5, top: ys[ys.length - 1] - 5,
+            width: 10, height: 10, borderRadius: 5, backgroundColor: '#E17055',
+            borderWidth: 2, borderColor: '#fff',
+          }} />
+        </View>
+      </View>
+    );
+  };
+
+  // ── 频段功率条 ──────────────────────────────────────────────
+  const BandBars = () => (
+    <View style={styles.card}>
+      <Text style={styles.sectionTitle}>🧠 脑波频段功率</Text>
+      {BANDS.map(b => {
+        const val = bandPowers[b.key as keyof BandPowers];
+        return (
+          <View key={b.key} style={styles.bandRow}>
+            <View style={styles.bandLabelWrap}>
+              <Text style={[styles.bandLabel, { color: b.color }]}>{b.label}</Text>
+              <Text style={styles.bandSub}>{b.range}</Text>
+            </View>
+            <View style={styles.barTrack}>
+              <View style={[styles.barFill, { width: `${val}%`, backgroundColor: b.color }]} />
+            </View>
+            <View style={styles.bandRightWrap}>
+              <Text style={[styles.bandPct, { color: b.color }]}>{val}%</Text>
+              <Text style={styles.bandNote}>{b.note}</Text>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+
+  // ── 渲染 ────────────────────────────────────────────────────
+  const sigColor = signalColor(signal);
+  const topBand  = BANDS.reduce((a, b) =>
+    bandPowers[b.key as keyof BandPowers] > bandPowers[a.key as keyof BandPowers] ? b : a
+  );
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>BCI 冥想播放器</Text>
-      
+    <ScrollView style={styles.root} contentContainerStyle={{ paddingBottom: 40 }}>
+
+      {/* 顶栏 */}
+      <View style={styles.header}>
+        <Text style={styles.title}>BCI 冥想平台</Text>
+        <View style={styles.headerRight}>
+          {typeof battery === 'number' && (
+            <View style={styles.batteryWrap}>
+              <Text style={styles.batteryText}>🔋 {battery}%</Text>
+              <View style={[styles.batteryBar, { width: battery * 0.28 }]} />
+            </View>
+          )}
+          <TouchableOpacity
+            style={[styles.mockBtn, mockMode && styles.mockBtnOn]}
+            onPress={toggleMock}>
+            <Text style={styles.mockBtnText}>{mockMode ? '⏹ 停止模拟' : '🧪 模拟'}</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* 信号状态栏 */}
+      <View style={[styles.signalBadge, { borderColor: sigColor }]}>
+        <View style={[styles.signalDot, { backgroundColor: sigColor }]} />
+        <Text style={[styles.signalText, { color: sigColor }]}>{signalLabel(signal)}</Text>
+        {typeof signal === 'number' && (
+          <Text style={[styles.signalPct, { color: sigColor }]}>{signal}%</Text>
+        )}
+        {packetsRx > 0 && (
+          <Text style={styles.packetBadge}>
+            {packetsRx < 1000 ? `${packetsRx}包` : `${(packetsRx / 1000).toFixed(1)}k包`}
+          </Text>
+        )}
+      </View>
+
+      {/* 主仪表盘 */}
       <View style={styles.dashboard}>
         <View style={styles.dashItem}>
-          <Text style={styles.dashLabel}>困意 {drowsiness}%</Text>
+          <Text style={styles.dashLabel}>困意指数</Text>
+          <Text style={[styles.dashValue, {
+            color: drowsiness > 70 ? '#FF5252' : drowsiness > 40 ? '#FFCA28' : '#00E676'
+          }]}>
+            {drowsiness}%
+          </Text>
+          <Text style={styles.dashSub}>
+            {drowsiness > 70 ? '⚠️ 疲劳' : drowsiness > 40 ? '😑 注意' : '😊 清醒'}
+          </Text>
         </View>
+        <View style={styles.dashDivider} />
         <View style={styles.dashItem}>
-          <Text style={styles.dashLabel}>信号 {signal}%</Text>
+          <Text style={styles.dashLabel}>主导波段</Text>
+          <Text style={[styles.dashValue, { color: topBand.color }]}>{topBand.label}</Text>
+          <Text style={styles.dashSub}>{topBand.note} · {topBand.range}</Text>
         </View>
       </View>
 
-      <View style={styles.playerCard}>
-        <Text style={styles.musicText}>🎵 {musicName}</Text>
+      <EEGWaveform />
+      <DrowsinessChart />
+      <BandBars />
+
+      {/* 数据保存控制 */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>💾 原始数据保存</Text>
+        <Text style={styles.saveDesc}>
+          {isSaving
+            ? `保存中... 📂 ${savePath || 'sleep_logs/raw_eeg_*.csv'}`
+            : '关闭 – 点击下方开关启用保存'}
+        </Text>
+        <TouchableOpacity
+          style={[styles.saveToggle, isSaving && styles.saveToggleOn]}
+          onPress={toggleSave}>
+          <Text style={styles.btnText}>{isSaving ? '⏹ 停止保存' : '💾 开始保存 EEG'}</Text>
+        </TouchableOpacity>
+        {isSaving && (
+          <Text style={styles.saveNote}>
+            每次会话独立文件，包含时间戳 · 通道 · 样本序号 · µV 值
+          </Text>
+        )}
+      </View>
+
+      {/* 冥想音乐 */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>🎵 冥想音乐</Text>
+        <Text style={styles.musicText}>{musicName}</Text>
         <View style={styles.btnGroup}>
-          <Button title="选择本地音乐" onPress={pickAndPlay} color="#8E44AD" />
-          <Button title={isPlaying ? "暂停" : "播放"} onPress={togglePlay} />
+          <TouchableOpacity style={styles.btnPurple} onPress={pickAndPlay}>
+            <Text style={styles.btnText}>选择音频</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.btnBlue, isPlaying && styles.btnRed]}
+            onPress={togglePlay}>
+            <Text style={styles.btnText}>{isPlaying ? '⏸️ 暂停' : '▶️ 播放'}</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
-      <View style={styles.buttonContainer}>
-        <Button title="重新扫描头环" onPress={scanAndConnect} color="#4A90E2" />
-        {savedDeviceId ? (
-          <View style={{marginTop: 10}}>
-            <Text style={{textAlign: 'center', color: '#666'}}>已配对设备: {savedDeviceId.substring(0, 8)}...</Text>
-            <Button title="清除配对记录" onPress={clearPairedDevice} color="#FF6B6B" />
-          </View>
-        ) : null}
-      </View>
-      
-      <ScrollView style={styles.logBox}>
+      {/* 蓝牙操作 */}
+      <TouchableOpacity style={styles.actionBtn} onPress={scanAndConnect}>
+        <Text style={styles.btnText}>📡 扫描并连接 Muse 头环</Text>
+      </TouchableOpacity>
+      {savedDeviceId && (
+        <TouchableOpacity style={styles.clearBtn} onPress={clearPairedDevice}>
+          <Text style={styles.clearBtnText}>🗑️ 清除配对: {savedDeviceId.substring(0, 10)}…</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* 日志 */}
+      <View style={styles.logBox}>
+        <Text style={styles.logHeader}>── 系统日志 ──</Text>
         {logs.map((l, i) => <Text key={i} style={styles.logText}>{l}</Text>)}
-      </ScrollView>
-    </View>
+      </View>
+
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: '#f0f2f5', marginTop: 30 },
-  title: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 20 },
-  dashboard: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 },
-  dashItem: { flex: 1, backgroundColor: '#fff', padding: 15, borderRadius: 10, marginHorizontal: 5, alignItems: 'center' },
-  dashLabel: { fontSize: 15, fontWeight: 'bold', color: '#333' },
-  playerCard: { backgroundColor: '#fff', padding: 20, borderRadius: 15, elevation: 4, marginBottom: 20 },
-  musicText: { fontSize: 16, marginBottom: 15, textAlign: 'center' },
-  btnGroup: { flexDirection: 'row', justifyContent: 'space-around' },
-  buttonContainer: { flexDirection: 'column', alignItems: 'center' },
-  logBox: { flex: 1, marginTop: 10, backgroundColor: '#e0e0e0', padding: 10, borderRadius: 8 },
-  logText: { fontSize: 12, color: '#333', marginBottom: 4 }
+  root:          { flex: 1, backgroundColor: '#0D0F14' },
+  header:        { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, paddingTop: 54 },
+  headerRight:   { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  title:         { fontSize: 22, fontWeight: '700', color: '#EAEAEA' },
+  batteryWrap:   { alignItems: 'center', gap: 3 },
+  batteryText:   { color: '#aaa', fontSize: 12 },
+  batteryBar:    { height: 3, backgroundColor: '#00E676', borderRadius: 2 },
+  mockBtn:       { backgroundColor: '#2A2D3A', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: '#444' },
+  mockBtnOn:     { backgroundColor: '#00B894', borderColor: '#00B894' },
+  mockBtnText:   { color: '#fff', fontSize: 12, fontWeight: '600' },
+  signalBadge:   { flexDirection: 'row', alignItems: 'center', marginHorizontal: 20, marginBottom: 14, borderWidth: 1, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 14, gap: 8 },
+  signalDot:     { width: 9, height: 9, borderRadius: 5 },
+  signalText:    { fontSize: 13, fontWeight: '600', flex: 1 },
+  signalPct:     { fontSize: 13, fontWeight: '700' },
+  packetBadge:   { fontSize: 10, color: '#555', backgroundColor: '#1A1D27', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 10 },
+  dashboard:     { flexDirection: 'row', marginHorizontal: 20, marginBottom: 16, backgroundColor: '#1A1D27', borderRadius: 16, overflow: 'hidden' },
+  dashItem:      { flex: 1, padding: 18, alignItems: 'center' },
+  dashDivider:   { width: 1, backgroundColor: '#2A2D3A', marginVertical: 16 },
+  dashLabel:     { fontSize: 13, color: '#888', marginBottom: 6 },
+  dashValue:     { fontSize: 30, fontWeight: '800' },
+  dashSub:       { fontSize: 12, color: '#666', marginTop: 4 },
+  card:          { marginHorizontal: 20, marginBottom: 16, backgroundColor: '#1A1D27', borderRadius: 16, padding: 16 },
+  sectionTitle:  { fontSize: 14, color: '#EAEAEA', fontWeight: '700', marginBottom: 14 },
+  gridLine:      { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#2A2D3A' },
+  gridLabel:     { position: 'absolute', right: 0, top: -8, fontSize: 9, color: '#444' },
+  bandRow:       { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  bandLabelWrap: { width: 52 },
+  bandLabel:     { fontSize: 13, fontWeight: '700' },
+  bandSub:       { fontSize: 9, color: '#555' },
+  barTrack:      { flex: 1, height: 8, backgroundColor: '#2A2D3A', borderRadius: 4, marginHorizontal: 10, overflow: 'hidden' },
+  barFill:       { height: 8, borderRadius: 4 },
+  bandRightWrap: { width: 52, alignItems: 'flex-end' },
+  bandPct:       { fontSize: 13, fontWeight: '700' },
+  bandNote:      { fontSize: 9, color: '#555' },
+  saveDesc:      { fontSize: 12, color: '#777', marginBottom: 12, lineHeight: 18 },
+  saveToggle:    { backgroundColor: '#2A7DB5', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 10, alignItems: 'center', marginBottom: 8 },
+  saveToggleOn:  { backgroundColor: '#E74C3C' },
+  saveNote:      { fontSize: 11, color: '#555', textAlign: 'center', marginTop: 4 },
+  musicText:     { fontSize: 14, color: '#aaa', marginBottom: 16, textAlign: 'center' },
+  btnGroup:      { flexDirection: 'row', justifyContent: 'center', gap: 12 },
+  btnPurple:     { backgroundColor: '#8E44AD', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 10 },
+  btnBlue:       { backgroundColor: '#3498DB', paddingVertical: 12, paddingHorizontal: 24, borderRadius: 10 },
+  btnRed:        { backgroundColor: '#E74C3C' },
+  btnText:       { color: '#fff', fontWeight: '700', fontSize: 14 },
+  actionBtn:     { backgroundColor: '#4A90E2', marginHorizontal: 20, padding: 16, borderRadius: 12, alignItems: 'center', marginBottom: 10 },
+  clearBtn:      { alignItems: 'center', paddingVertical: 8 },
+  clearBtnText:  { color: '#FF6B6B', fontSize: 12 },
+  logBox:        { margin: 20, backgroundColor: '#0A0C11', borderRadius: 12, padding: 14 },
+  logHeader:     { color: '#444', fontSize: 11, textAlign: 'center', marginBottom: 8 },
+  logText:       { fontSize: 11, color: '#00FF88', marginBottom: 5, fontFamily: 'monospace' },
 });
