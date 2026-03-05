@@ -4,7 +4,7 @@ import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import TrackPlayer, { Capability, useProgress, State } from 'react-native-track-player';
-import DocumentPicker from 'react-native-document-picker';
+import DocumentPicker from '@react-native-documents/picker';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
 const bleManager = new BleManager();
