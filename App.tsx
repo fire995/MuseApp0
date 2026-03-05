@@ -6,6 +6,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import TrackPlayer, { Capability, useProgress, State } from 'react-native-track-player';
 import DocumentPicker from '@react-native-documents/picker';
 
+// 添加调试日志
+console.log("TrackPlayer Module:", TrackPlayer); 
+
 if (!global.Buffer) { global.Buffer = Buffer; }
 const bleManager = new BleManager();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
