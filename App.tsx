@@ -130,6 +130,9 @@ export default function App() {
   const [battery,       setBattery]       = useState<number | string>('--');
   const [signalLevel,   setSignalLevel]   = useState<SignalLevel>('none');
   const [signalScore,   setSignalScore]   = useState(0);
+  const [electrodeQuality, setElectrodeQuality] = useState<Record<string, number>>({
+    TP9: 0, AF7: 0, AF8: 0, TP10: 0
+  });
   const [packetsRx,     setPacketsRx]     = useState(0);
   const [samplingMode,  setSamplingMode]  = useState<SamplingMode>('dense');
   const [savedDeviceId, setSavedDeviceId] = useState<string | null>(null);
@@ -203,6 +206,7 @@ export default function App() {
 
         if (msg.type === 'metrics') {
           updateSignal(msg.signal ?? 0);
+          if (msg.electrode_quality) setElectrodeQuality(msg.electrode_quality);
           if (typeof msg.packets_rx === 'number') setPacketsRx(msg.packets_rx);
           // 困意高时自动降音量
           if ((msg.drowsiness ?? 0) > 75 && isPlaying) {
@@ -232,7 +236,6 @@ export default function App() {
       await TrackPlayer.updateOptions({
         android: { appKilledPlaybackBehavior: AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification },
         capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
-        compactCapabilities: [Capability.Play, Capability.Pause],
       });
     } catch {}
   };
@@ -249,7 +252,7 @@ export default function App() {
         setIsPlaying(true);
         addLog(`▶️ ${res.name}`);
       }
-    } catch (err) { if (!DocumentPicker.isCancel(err)) addLog(`❌ ${err}`); }
+    } catch (err) { addLog(`❌ ${err}`); }
   };
 
   const togglePlay = async () => {
@@ -339,14 +342,18 @@ export default function App() {
 
       device.monitorCharacteristicForService(MUSE_SERVICE, MUSE_CONTROL, (_, char) => {
         if (!char?.value) return;
+
+        // 转发所有控制包给后端解析（包含电池和 Horseshoe 硬件阻抗）
+        if (ws.current?.readyState === WebSocket.OPEN) {
+          ws.current.send(JSON.stringify({ channel: '0001', data: char.value }));
+        }
+
         const txt = Buffer.from(char.value, 'base64').toString();
         ctrlBuf += txt;
 
         const bp = ctrlBuf.match(/"bp"\s*:\s*(\d+)/);
         if (bp) {
           setBattery(parseInt(bp[1]));
-          ws.current?.readyState === WebSocket.OPEN &&
-            ws.current.send(JSON.stringify({ channel: '0001', data: char.value }));
           ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
         }
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
@@ -530,7 +537,18 @@ export default function App() {
 
       {/* 信号状态 */}
       <View style={[s.sigCard, { borderColor: SIG.color }]}>
-        <View style={[s.sigDot, { backgroundColor: SIG.color }]} />
+        <View style={{ gap: 6 }}>
+          <View style={[s.sigDot, { backgroundColor: SIG.color }]} />
+          {/* Horseshoe 硬件佩戴示意图 */}
+          <View style={s.horseshoe}>
+            {['TP9', 'AF7', 'AF8', 'TP10'].map(ch => (
+              <View key={ch} style={[
+                s.hsDot,
+                { backgroundColor: electrodeQuality[ch] >= 65 ? '#00E676' : electrodeQuality[ch] >= 35 ? '#FFCA28' : '#FF5252' }
+              ]} />
+            ))}
+          </View>
+        </View>
         <View style={{ flex: 1 }}>
           <Text style={[s.sigLabel, { color: SIG.color }]}>{SIG.label}</Text>
           {SIG.desc ? <Text style={s.sigDesc}>{SIG.desc}</Text> : null}
@@ -647,6 +665,8 @@ const s = StyleSheet.create({
                     marginBottom: 14, borderWidth: 1.5, borderRadius: 12,
                     paddingVertical: 10, paddingHorizontal: 14, gap: 10 },
   sigDot:         { width: 10, height: 10, borderRadius: 5 },
+  horseshoe:      { flexDirection: 'row', gap: 3 },
+  hsDot:          { width: 6, height: 6, borderRadius: 3 },
   sigLabel:       { fontSize: 13, fontWeight: '700' },
   sigDesc:        { fontSize: 11, color: '#666', marginTop: 2 },
   sigScore:       { fontSize: 18, fontWeight: '800' },
