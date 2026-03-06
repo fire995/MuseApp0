@@ -1,6 +1,10 @@
 import { registerRootComponent } from 'expo';
 import TrackPlayer from 'react-native-track-player';
+import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import App from './App';
+
+// 注册前台服务
+ReactNativeForegroundService.register();
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,

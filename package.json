@@ -12,15 +12,21 @@
     "@config-plugins/react-native-ble-plx": "^7.0.0",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-documents/picker": "^12.0.1",
+    "@supersami/rn-foreground-service": "^2.2.5",
     "buffer": "^6.0.3",
     "expo": "~55.0.4",
     "expo-build-properties": "~55.0.9",
     "expo-dev-client": "~55.0.11",
+    "expo-file-system": "~55.0.10",
+    "expo-keep-awake": "~55.0.4",
+    "expo-sharing": "~55.0.11",
     "expo-status-bar": "~55.0.4",
+    "fft.js": "^4.0.4",
     "react": "19.2.0",
     "react-native": "0.83.2",
     "react-native-ble-plx": "^3.1.1",
-    "react-native-track-player": "5.0.0-alpha0"
+    "react-native-track-player": "5.0.0-alpha0",
+    "react-native-zip-archive": "^7.0.2"
   },
   "devDependencies": {
     "@react-native-community/cli": "^20.1.2",

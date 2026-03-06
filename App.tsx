@@ -1,7 +1,33 @@
+/**
+ * Muse EEG 数据解码器
+ * 将 Muse 头环传输的 Base64 编码数据解码为微伏(μV)单位的原始 EEG 信号
+ */
+export const decodeEEG = (base64: string): number[] => {
+  const buf = Buffer.from(base64, 'base64');
+  const samples: number[] = [];
+  // 跳过前 2 字节序号
+  let bitIndex = 16; 
+  for (let i = 0; i < 12; i++) {
+    // 提取 12-bit 采样
+    const bytePos = Math.floor(bitIndex / 8);
+    const bitOff  = bitIndex % 8;
+    // 跨字节读取 12 位
+    const val = (
+      (buf[bytePos] << 16 | buf[bytePos + 1] << 8 | buf[bytePos + 2]) 
+      >> (24 - 12 - bitOff)
+    ) & 0xFFF;
+    
+    // 转换为微伏 (公式：(val - 2048) * 0.488)
+    samples.push((val - 2048) * 0.488);
+    bitIndex += 12;
+  }
+  return samples;
+};
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Platform,
   PermissionsAndroid, TouchableOpacity, Dimensions,
+  AppState
 } from 'react-native';
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
@@ -10,13 +36,23 @@ import TrackPlayer, {
   Capability, AppKilledPlaybackBehavior, useProgress,
 } from 'react-native-track-player';
 import * as DocumentPicker from '@react-native-documents/picker';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import Zip from 'react-native-zip-archive';
+import ReactNativeForegroundService from '@supersami/rn-foreground-service';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { decodeEEG } from './utils/MuseDecoder';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
+
+// 注册前台任务
+ReactNativeForegroundService.register();
 
 // ── 常量 ─────────────────────────────────────────────────────────
 const bleManager = new BleManager();
 const sleep      = (ms: number) => new Promise(r => setTimeout(r, ms));
-const WS_URL     = 'ws://192.168.0.200:8001/ws/eeg';
+// [架构移除] 废弃 WebSocket
+// const WS_URL = 'ws://192.168.0.200:8001/ws/eeg'; 
 const SCREEN_W   = Dimensions.get('window').width - 40;
 
 const MUSE_SERVICE    = '0000fe8d-0000-1000-8000-00805f9b34fb';
@@ -97,7 +133,7 @@ const ThetaWave = React.memo(({ data }: { data: number[] }) => {
       })}
     </View>
   );
-});
+};
 
 // ── 采集时长选择器 ────────────────────────────────────────────────
 const DENSE_OPTIONS = [0, 10, 20, 30, 60, 90, 120];
@@ -152,7 +188,10 @@ export default function App() {
   // 日志
   const [logs, setLogs] = useState<string[]>([]);
 
-  const ws              = useRef<WebSocket | null>(null);
+  const logFileUri      = useRef<string | null>(null);
+  const fileBuffer      = useRef<string>(''); // 内存写缓冲
+  const sessionStartTime = useRef<number>(Date.now());
+  const filePartIndex = useRef<number>(1);
   const deviceRef       = useRef<Device | null>(null);
   const isConnecting    = useRef(false);
   const isAutoRecon     = useRef(false);
@@ -161,6 +200,8 @@ export default function App() {
   const samplingTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 信号平滑（10 帧中位数，彻底消除跳变）
   const signalBuf       = useRef<number[]>([]);
+  
+  // 导入解码器，已在顶部导入
 
   const addLog = useCallback((msg: string) => {
     console.log(msg);
@@ -180,53 +221,133 @@ export default function App() {
 
   useEffect(() => {
     setupMusicPlayer();
-    connectWebSocket();
+    // 本地文件系统初始化准备，取代 connectWebSocket()
+    initLocalFileSystem();
     checkSavedDevice();
+    
+    const appStateSub = AppState.addEventListener('change', (nextState) => {
+      // 避坑：系统切后台/非活跃瞬间，强行清空 JS 堆内存缓冲推入文件系统
+      if (nextState === 'background' || nextState === 'inactive') {
+        flushBufferToFile();
+      }
+    });
+
     return () => {
-      ws.current?.close();
       if (heartbeat.current)    clearInterval(heartbeat.current);
       if (samplingTimer.current) clearTimeout(samplingTimer.current);
+      appStateSub.remove();
     };
   }, []);
 
-  // ── WebSocket ────────────────────────────────────────────────
-  const connectWebSocket = () => {
-    const socket = new WebSocket(WS_URL);
-    ws.current = socket;
-    socket.onopen  = () => addLog('🟢 后端已连接');
-    socket.onerror = () => addLog('🔴 后端连接失败，检查 IP / 后端是否启动');
-    socket.onclose = () => addLog('🔴 WebSocket 已关闭');
-    socket.onmessage = async (e) => {
-      try {
-        const msg = JSON.parse(e.data);
+  // ── 本地存储管理器 ────────────────────────────────────────────────
+  const cleanOldLogs = async () => {
+    try {
+      const dirUri = FileSystem.documentDirectory;
+      if (!dirUri) return;
+      const files = await FileSystem.readDirectoryAsync(dirUri);
+      const now = Date.now();
+      const SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000;
 
-        if (msg.type === 'battery') {
-          setBattery(msg.value);
-        }
-
-        if (msg.type === 'metrics') {
-          updateSignal(msg.signal ?? 0);
-          if (msg.electrode_quality) setElectrodeQuality(msg.electrode_quality);
-          if (typeof msg.packets_rx === 'number') setPacketsRx(msg.packets_rx);
-          // 困意高时自动降音量
-          if ((msg.drowsiness ?? 0) > 75 && isPlaying) {
-            const vol = await TrackPlayer.getVolume();
-            if (vol > 0.1) await TrackPlayer.setVolume(Math.max(0.1, vol - 0.05));
+      for (const file of files) {
+        // 仅处理应用自己产生的日志与压缩包
+        if (file.endsWith('.csv') || file.endsWith('.zip')) {
+          const fileInfo = await FileSystem.getInfoAsync(dirUri + file);
+          if (fileInfo.exists && (now - fileInfo.modificationTime * 1000) > SEVEN_DAYS_MS) {
+            await FileSystem.deleteAsync(dirUri + file, { idempotent: true });
+            console.log(`🗑️ 存储防爆：已清理过期日志 ${file}`);
           }
         }
+      }
+    } catch (e) {
+      console.warn('清理过期日志失败', e);
+    }
+  };
 
-        if (msg.type === 'theta_wave') {
-          // 每次后端推来的都是最新 20 个点，直接拼接
-          setThetaWave(prev => [...prev, ...(msg.data || [])].slice(-60));
-        }
+  const createNewLogFile = async () => {
+    const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+    const uri = `${FileSystem.documentDirectory}muse_log_${timeStr}_part${filePartIndex.current}.csv`;
+    await FileSystem.writeAsStringAsync(uri, 'timestamp,channel,data\n', { encoding: FileSystem.EncodingType.UTF8 });
+    logFileUri.current = uri;
+    addLog(`📄 创建数据分片: part${filePartIndex.current}`);
+  };
 
-        if (msg.type === 'save_status') {
-          setIsSaving(msg.saving);
-          if (msg.path) setSavePath(msg.path);
-          addLog(msg.saving ? `💾 保存中: ${msg.path}` : '⏹ 保存已停止');
-        }
-      } catch {}
-    };
+  const initLocalFileSystem = async () => {
+    // 启动前卫检查，排空历史垃圾
+    await cleanOldLogs();
+    
+    filePartIndex.current = 1;
+    sessionStartTime.current = Date.now();
+    await createNewLogFile();
+  };
+
+  const flushBufferToFile = async () => {
+    if (!logFileUri.current || fileBuffer.current.length === 0) return;
+    
+    const chunk = fileBuffer.current;
+    fileBuffer.current = ''; 
+    
+    try {
+      await FileSystem.writeAsStringAsync(logFileUri.current, chunk, {
+        encoding: FileSystem.EncodingType.UTF8,
+        append: true,
+      });
+
+      // 分片检查：如果当前文件写入超过 1 小时，立刻切片
+      if (Date.now() - sessionStartTime.current > 3600 * 1000) {
+        filePartIndex.current += 1;
+        sessionStartTime.current = Date.now();
+        await createNewLogFile();
+      }
+    } catch (e) {
+      addLog('🔴 本地写入异常');
+    }
+  };
+
+  // 定义一个简单的 4-8Hz 带通近似逻辑（或直接显示滤波后的原始波形）
+  const processThetaWave = (rawSamples: number[]) => {
+    // 简易下采样：每 12 个点取 1 个，降低绘图压力
+    const displayPoint = rawSamples[0]; 
+    setThetaWave(prev => [...prev, displayPoint].slice(-60));
+  };
+
+  // 添加困意分析函数
+  const analyzeDrowsiness = async (thetaEnergy: number, alphaEnergy: number) => {
+    // 极简困意启发式算法：Theta 波增加，Alpha 波减弱，标志进入浅睡 (N1期)
+    // 此处根据实际算出的能量幅值调整阈值
+    const drowsinessScore = (thetaEnergy / (alphaEnergy + 1)) * 100; 
+    
+    // 满足困意条件且正在播放音乐
+    if (drowsinessScore > 75 && isPlaying) {
+      const vol = await TrackPlayer.getVolume();
+      if (vol > 0.1) {
+        // 每次平滑降低 5% 音量
+        await TrackPlayer.setVolume(Math.max(0.1, vol - 0.05));
+        addLog(`💤 检测到入睡脑波，音量已自动调低至 ${Math.floor((vol - 0.05)*100)}%`);
+      }
+    }
+  };
+
+  const handleMuseDataPacket = (channel: string, base64Data: string) => {
+    // 1. 原始数据入库 (保持离线保存需求)
+    const timestamp = new Date().toISOString();
+    fileBuffer.current += `${timestamp},${channel},${base64Data}\n`;
+    
+    // 当缓冲区达到一定阈值（如500条）时刷入闪存，避免频繁 IO
+    if (fileBuffer.current.length > 10240) {
+      flushBufferToFile();
+    }
+
+    // 2. 实时 UI 反馈 (仅处理 AF7/AF8 通道以节省性能)
+    if (channel === '0014' || channel === '0015') {
+      const samples = decodeEEG(base64Data);
+      processThetaWave(samples);
+      
+      // 分析频域特征，用于困意检测
+      const { theta, alpha } = analyzeFrequency(samples);
+      analyzeDrowsiness(theta, alpha);
+      
+      setPacketsRx(prev => prev + 1);
+    }
   };
 
   // ── 音乐 ─────────────────────────────────────────────────────
@@ -264,22 +385,130 @@ export default function App() {
 
   // ── 保存控制 ─────────────────────────────────────────────────
   const toggleSave = () => {
-    if (ws.current?.readyState !== WebSocket.OPEN) {
-      addLog('⚠️ 后端未连接，无法控制保存');
+    // 切换保存状态
+    setIsSaving(!isSaving);
+    if (!isSaving) {
+      addLog(`💾 开始保存数据`);
+      // 创建新的日志文件
+      const fileName = `MuseData_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+      logFileUri.current = `${FileSystem.documentDirectory}${fileName}`;
+      setSavePath(fileName);
+      
+      // 启动前台服务和CPU唤醒锁
+      startForegroundCapture();
+    } else {
+      addLog(`⏹ 停止保存`);
+      // 确保最后的缓冲区内容被写入
+      flushBufferToFile();
+      logFileUri.current = null;
+      
+      // 停止前台服务和CPU唤醒锁
+      stopForegroundCapture();
+    }
+  };
+
+  // ── 启动前台采集服务 ──────────────────────────────────────────────
+  const startForegroundCapture = async () => {
+    if (Platform.OS === 'android') {
+      // 1. 拉起 connectedDevice 类型的前台服务通知
+      await ReactNativeForegroundService.start({
+        id: 144,
+        title: 'Muse BCI 采集中',
+        message: '正在后台接收并存储脑波数据...',
+        icon: 'ic_launcher',
+        setOnlyAlertOnce: true,
+        color: '#000000',
+        visibility: 'public',
+      });
+      
+      // 2. 注入 Partial Wake Lock 锁死 CPU 运行态
+      await activateKeepAwakeAsync('muse-ble-lock');
+    }
+  };
+
+  const stopForegroundCapture = () => {
+    if (Platform.OS === 'android') {
+      ReactNativeForegroundService.stop();
+      deactivateKeepAwake('muse-ble-lock');
+    }
+  };
+
+  // ── 引导用户设置电池优化豁免 ───────────────────────────────────────
+  const ensureSamsungUnrestricted = async () => {
+    if (Platform.OS === 'android') {
+      addLog('⚠️ 【三星设备必做】即将跳转设置。请点击 "电池" -> 选择 "无限制(Unrestricted)"');
+      // 延迟2秒让用户看清日志，随后拉起系统设置
+      setTimeout(() => {
+        Linking.openSettings();
+      }, 2000);
+    }
+  };
+
+  // ── 导出保存的文件 ──────────────────────────────────────────────
+  const exportSavedFile = async () => {
+    if (fileBuffer.current.length > 0) {
+      // 确保所有缓冲区数据都已写入文件
+      await flushBufferToFile();
+    }
+
+    // 获取所有数据文件
+    const documentDir = FileSystem.documentDirectory;
+    const files = await FileSystem.readDirectoryAsync(documentDir!);
+    const dataFiles = files.filter(f => f.startsWith('muse_log_') && f.endsWith('.csv'));
+
+    if (dataFiles.length === 0) {
+      addLog('⚠️ 没有找到数据文件');
       return;
     }
-    ws.current.send(JSON.stringify({
-      type:          'settings',
-      save_raw:      !isSaving,
-      dense_minutes: denseMins,
-    }));
+
+    if (dataFiles.length === 1) {
+      // 如果只有一个文件，可以直接分享
+      const fileUri = `${documentDir}${dataFiles[0]}`;
+      if (await FileSystem.getInfoAsync(fileUri).exists) {
+        await Sharing.shareAsync(fileUri);
+        addLog(`📤 已导出数据文件: ${dataFiles[0]}`);
+      } else {
+        addLog('⚠️ 文件不存在');
+      }
+    } else {
+      // 多个文件，需要打包成ZIP
+      try {
+        const zipSourcePath = `${documentDir}temp_zip_source`;
+        const zipTargetPath = `${documentDir}muse_data_collection.zip`;
+
+        // 创建临时目录
+        await FileSystem.makeDirectoryAsync(zipSourcePath, { intermediates: true });
+
+        // 复制所有CSV文件到临时目录
+        for (const file of dataFiles) {
+          await FileSystem.copyAsync({
+            from: `${documentDir}${file}`,
+            to: `${zipSourcePath}/${file}`
+          });
+        }
+
+        // 压缩临时目录
+        await Zip.zip(`${zipSourcePath}`, zipTargetPath);
+
+        // 删除临时目录
+        await FileSystem.deleteAsync(zipSourcePath);
+
+        // 分享ZIP文件
+        await Sharing.shareAsync(zipTargetPath);
+        addLog(`📦 已打包 ${dataFiles.length} 个数据分片并导出`);
+      } catch (error) {
+        addLog(`❌ 打包失败: ${(error as Error).message}`);
+      }
+    }
   };
 
   // ── BLE 写命令 ────────────────────────────────────────────────
   const write = (device: Device, cmd: string) =>
     device.writeCharacteristicWithoutResponseForService(
       MUSE_SERVICE, MUSE_CONTROL, cmd
-    ).catch(() => {});
+    ).catch((error) => {
+      addLog(`❌ BLE写入失败: ${error.message}`);
+    });
 
   // ── 自适应采样：发 BLE preset 命令给头环省电 ─────────────────
   //
@@ -316,9 +545,9 @@ export default function App() {
     await sleep(150);
     await write(device, CMD_START);
     addLog('🌙 低功耗模式已启动（EEG ~50Hz）');
-    // 3. 通知后端
-    ws.current?.readyState === WebSocket.OPEN &&
-      ws.current.send(JSON.stringify({ type: 'sampling_mode', mode: 'sparse' }));
+    // 3. 通知后端 - 移除WebSocket通知
+    // ws.current?.readyState === WebSocket.OPEN &&
+    //   ws.current.send(JSON.stringify({ type: 'sampling_mode', mode: 'sparse' }));
   };
 
   // ── 完整 Muse 协议启动 ────────────────────────────────────────
@@ -343,19 +572,31 @@ export default function App() {
       device.monitorCharacteristicForService(MUSE_SERVICE, MUSE_CONTROL, (_, char) => {
         if (!char?.value) return;
 
-        // 转发所有控制包给后端解析（包含电池和 Horseshoe 硬件阻抗）
-        if (ws.current?.readyState === WebSocket.OPEN) {
-          ws.current.send(JSON.stringify({ channel: '0001', data: char.value }));
-        }
-
         const txt = Buffer.from(char.value, 'base64').toString();
         ctrlBuf += txt;
 
-        const bp = ctrlBuf.match(/"bp"\s*:\s*(\d+)/);
-        if (bp) {
-          setBattery(parseInt(bp[1]));
+        // 解析电池
+        const bpMatch = ctrlBuf.match(/"bp"\s*:\s*(\d+)/);
+        if (bpMatch) {
+          setBattery(parseInt(bpMatch[1]));
           ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
         }
+
+        // 解析佩戴质量 (Horseshoe)
+        const hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[(\d+),(\d+),(\d+),(\d+)\]/);
+        if (hsMatch) {
+          const [tp9, af7, af8, tp10] = hsMatch.slice(1).map(v => {
+            // Muse 原始值：1=好, 2=中, 4=差。转换成百分比供 UI 使用
+            const vInt = parseInt(v);
+            return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
+          });
+          setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
+          // 计算综合信号分层
+          const avg = (tp9 + af7 + af8 + tp10) / 4;
+          updateSignal(avg);
+          ctrlBuf = ctrlBuf.replace(/"hs":\s*\[\d+,\d+,\d+,\d+\]/, '');
+        }
+
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
           cmdResolve(); cmdResolve = null;
           ctrlBuf = ctrlBuf.replace(/"rc":0/, '');
@@ -378,8 +619,9 @@ export default function App() {
       addLog('🛡️ 订阅 EEG + PPG 通道…');
       [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
         device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (_, char) => {
-          if (char?.value && ws.current?.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify({ channel: uuid.substring(4, 8), data: char.value }));
+          if (char?.value && isSaving) {
+            // 将数据分发到本地处理管线
+            handleMuseDataPacket(uuid.substring(4, 8), char.value);
           }
         });
       });
@@ -639,6 +881,14 @@ export default function App() {
         {isSaving && savePath ? (
           <Text style={s.savePath}>📂 {savePath}</Text>
         ) : null}
+        
+        {!isSaving && savePath ? (
+          <TouchableOpacity
+            style={s.exportBtn}
+            onPress={exportSavedFile}>
+            <Text style={s.btnText}>📤 导出数据文件</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* 日志 */}
@@ -716,6 +966,8 @@ const s = StyleSheet.create({
   saveBtn:        { backgroundColor: '#2A7DB5', paddingVertical: 12, borderRadius: 10,
                     alignItems: 'center', marginBottom: 8 },
   saveBtnOn:      { backgroundColor: '#E74C3C' },
+  exportBtn:      { backgroundColor: '#5D408B', paddingVertical: 12, borderRadius: 10,
+                    alignItems: 'center', marginTop: 8 },
   savePath:       { fontSize: 11, color: '#555', textAlign: 'center' },
 
   logBox:         { margin: 20, backgroundColor: '#0A0C11', borderRadius: 12, padding: 14 },

@@ -31,7 +31,8 @@
             "newArchEnabled": false
           }
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "ios": {
       "supportsTablet": true
@@ -51,7 +52,9 @@
         "BLUETOOTH_CONNECT",
         "ACCESS_FINE_LOCATION",
         "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_CONNECTED_DEVICE",
         "WAKE_LOCK",
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT"
