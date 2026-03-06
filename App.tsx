@@ -375,8 +375,10 @@ export default function App() {
       addLog(`💾 开始保存数据`);
       // 创建新的日志文件
       const fileName = `MuseData_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-      logFileUri.current = `${FileSystem.documentDirectory}${fileName}`;
-      setSavePath(fileName);
+      // @ts-ignore
+      logFileUri.current = `${FileSystem.documentDirectory}${'muse_data.csv'}`;
+      setSavePath('muse_data.csv');
+      addLog(`📁 加载保存路径: muse_data.csv`);
       
       // 启动前台服务和CPU唤醒锁
       startForegroundCapture();
@@ -431,12 +433,14 @@ export default function App() {
   // ── 导出保存的文件 ──────────────────────────────────────────────
   const loadSavedFile = async () => {
     try {
+      // 设置默认的保存路径
+      const defaultFileName = 'muse_data.csv';
       // @ts-ignore
-      logFileUri.current = `${FileSystem.documentDirectory}${fileName}`;
-      setSavePath(fileName);
-      addLog(`📁 加载保存路径: ${fileName}`);
+      logFileUri.current = `${FileSystem.documentDirectory}${defaultFileName}`;
+      setSavePath(defaultFileName);
+      addLog(`📁 已设置保存路径: ${defaultFileName}`);
     } catch (e) {
-      addLog(`🔴 加载文件失败: ${e}`);
+      addLog(`🔴 设置保存路径失败: ${e}`);
     }
   };
 
