@@ -6,7 +6,7 @@ import {
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import TrackPlayer, { Capability, AppKilledPlaybackBehavior } from 'react-native-track-player';
+import TrackPlayer, { Capability, AppKilledPlaybackBehavior, useProgress } from 'react-native-track-player';
 import * as DocumentPicker from '@react-native-documents/picker';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
@@ -20,14 +20,38 @@ const MUSE_SERVICE    = '0000fe8d-0000-1000-8000-00805f9b34fb';
 const MUSE_CONTROL    = '273e0001-4c4d-454d-96be-f03bac821358';
 const ATHENA_CHANNELS = ['273e0013', '273e0014', '273e0015', '273e0016', '273e0017']
   .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
+const PPG_CHANNELS = ['273e0010', '273e0011'] // 0010: Infrared, 0011: Red
+  .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
 
 const BANDS = [
   { key: 'delta', label: 'Delta', range: '0.5–4Hz',  color: '#6C5CE7', note: '深睡' },
   { key: 'theta', label: 'Theta', range: '4–8Hz',    color: '#00B894', note: '困倦' },
   { key: 'alpha', label: 'Alpha', range: '8–13Hz',   color: '#0984E3', note: '放松' },
   { key: 'beta',  label: 'Beta',  range: '13–30Hz',  color: '#FDCB6E', note: '专注' },
+  { key: 'gamma', label: 'Gamma', range: '30–50Hz',  color: '#FD79A8', note: '顿悟' },
 ];
-type BandPowers = { delta: number; theta: number; alpha: number; beta: number };
+type BandPowers = { delta: number; theta: number; alpha: number; beta: number; gamma: number };
+
+// 隔离的进度条组件：避免音频的高频渲染导致整个 App 组件树重绘，这是 RN 性能优化的红线
+const ProgressBar = () => {
+  const { position, duration } = useProgress();
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
+  const pct = duration > 0 ? (position / duration) * 100 : 0;
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 16, gap: 10 }}>
+      <Text style={{ color: '#888', fontSize: 12, width: 36 }}>{formatTime(position)}</Text>
+      <View style={{ flex: 1, height: 4, backgroundColor: '#2A2D3A', borderRadius: 2}}>
+        <View style={{ height: '100%', width: `${pct}%`, backgroundColor: '#3498DB', borderRadius: 2}} />
+      </View>
+      <Text style={{ color: '#888', fontSize: 12, width: 36, textAlign: 'right' }}>{formatTime(duration)}</Text>
+    </View>
+  );
+};
 
 // ── 模拟数据 ──────────────────────────────────────────────────
 let mockPhase = 0;
@@ -37,16 +61,21 @@ const generateMockData = () => {
   const theta = Math.max(5, Math.min(95, 45 + Math.sin(mockPhase + 1) * 25   + Math.random() * 8));
   const alpha = Math.max(5, Math.min(95, 55 + Math.sin(mockPhase * 1.3) * 20 + Math.random() * 8));
   const beta  = Math.max(5, Math.min(95, 35 + Math.sin(mockPhase * 0.5 + 2) * 15 + Math.random() * 8));
-  const total = delta + theta + alpha + beta;
+  const gamma = Math.max(5, Math.min(95, 25 + Math.sin(mockPhase * 0.3 + 1.5) * 10 + Math.random() * 8));
+  const total = delta + theta + alpha + beta + gamma;
   return {
     bands: {
       delta: Math.round(delta / total * 100),
       theta: Math.round(theta / total * 100),
       alpha: Math.round(alpha / total * 100),
       beta:  Math.round(beta  / total * 100),
+      gamma: Math.round(gamma / total * 100),
     },
     drowsiness: Math.max(0, Math.min(100, Math.round(50 + Math.sin(mockPhase * 0.4) * 35))),
     signal: 85 + Math.round(Math.random() * 12),
+    // 注入模拟波峰：SpO2 锚定 95-100 健康区间，HRV 模拟 30-80ms 生理波动
+    hrv: Math.round(45 + Math.sin(mockPhase * 0.8) * 15 + Math.random() * 10),
+    spo2: Math.max(90, Math.min(100, Math.round(97 + Math.sin(mockPhase * 0.2) * 3))),
   };
 };
 
@@ -63,8 +92,10 @@ export default function App() {
   const [battery,       setBattery]       = useState<number | string>('--');
   const [signal,        setSignal]        = useState<number | string>('检测中...');
   const [drowsiness,    setDrowsiness]    = useState<number>(0);
-  const [bandPowers,    setBandPowers]    = useState<BandPowers>({ delta:25, theta:25, alpha:25, beta:25 });
+  const [bandPowers,    setBandPowers]    = useState<BandPowers>({ delta:25, theta:25, alpha:25, beta:25, gamma:25 });
   const [drowHistory,   setDrowHistory]   = useState<number[]>(new Array(40).fill(0));
+  const [hrv,           setHrv]           = useState<number | string>('--');
+  const [spo2,          setSpo2]          = useState<number | string>('--');
   const [eegWave,       setEegWave]       = useState<number[]>(new Array(30).fill(0));
   const [isPlaying,     setIsPlaying]     = useState(false);
   const [musicName,     setMusicName]     = useState('未加载音乐');
@@ -183,6 +214,9 @@ export default function App() {
           pushDrowsiness(msg.drowsiness);
           if (msg.bands) setBandPowers(msg.bands);
           if (typeof msg.packets_rx === 'number') setPacketsRx(msg.packets_rx);
+          // 拦截解析后端下发的多模态指标
+          if (typeof msg.hrv === 'number') setHrv(msg.hrv);
+          if (typeof msg.spo2 === 'number') setSpo2(msg.spo2);
           // 困意 > 75 时自动降低音量
           if (msg.drowsiness > 75 && isPlaying) {
             const vol = await TrackPlayer.getVolume();
@@ -279,9 +313,9 @@ export default function App() {
       await sendCmd('AmgK',          'halt');
       await sendCmd('BnAxMDM1Cg==',  'preset p1035');
 
-      // ── 订阅 EEG 数据通道（不订阅 MUSE_CONTROL，已上方处理）
-      log('🛡️ 订阅 EEG 通道 (0013-0017)...');
-      ATHENA_CHANNELS.forEach(uuid => {
+      // ── 订阅多模态数据通道 (EEG + PPG)
+      log('🛡️ 订阅 EEG 与 PPG 传感通道...');
+      [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
         device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (err, char) => {
           if (char?.value && ws.current?.readyState === WebSocket.OPEN) {
             ws.current!.send(JSON.stringify({
@@ -381,15 +415,29 @@ export default function App() {
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>〜 EEG 原始波形（TP9）</Text>
         <View style={{ height: H, width: W }}>
-          {xs.map((x, i) => i === 0 ? null : (
-            <View key={i} style={{
-              position: 'absolute', left: xs[i - 1], top: Math.min(ys[i - 1], ys[i]) - 1,
-              width: Math.sqrt(Math.pow(x - xs[i-1], 2) + Math.pow(ys[i] - ys[i-1], 2)),
-              height: 2, backgroundColor: '#00B894', borderRadius: 1,
-              transform: [{ rotate: `${Math.atan2(ys[i] - ys[i-1], x - xs[i-1]) * 180 / Math.PI}deg` }],
-              transformOrigin: '0 50%',
-            }} />
-          ))}
+          {xs.map((x, i) => {
+            if (i === 0) return null;
+            // 弃用 transformOrigin 方案，使用中心点偏移绝对定位，确保在所有 RN 版本下线条不发生偏移截断
+            const dx = x - xs[i - 1];
+            const dy = ys[i] - ys[i - 1];
+            const length = Math.sqrt(dx * dx + dy * dy);
+            const angle = Math.atan2(dy, dx);
+            const cx = xs[i - 1] + dx / 2;
+            const cy = ys[i - 1] + dy / 2;
+            
+            return (
+              <View key={i} style={{
+                position: 'absolute', 
+                left: cx - length / 2, 
+                top: cy - 1,
+                width: length,
+                height: 2, 
+                backgroundColor: '#00B894', 
+                borderRadius: 1,
+                transform: [{ rotate: `${angle}rad` }],
+              }} />
+            );
+          })}
         </View>
       </View>
     );
@@ -466,12 +514,15 @@ export default function App() {
       <View style={styles.header}>
         <Text style={styles.title}>BCI 冥想平台</Text>
         <View style={styles.headerRight}>
-          {typeof battery === 'number' && (
-            <View style={styles.batteryWrap}>
-              <Text style={styles.batteryText}>🔋 {battery}%</Text>
-              <View style={[styles.batteryBar, { width: battery * 0.28 }]} />
-            </View>
-          )}
+          {/* 架构调整：移除强类型拦截，允许在未连接时展示默认占位符，修复"电量不显示"问题 */}
+          <View style={styles.batteryWrap}>
+            <Text style={styles.batteryText}>
+              🔋 {battery}{typeof battery === 'number' ? '%' : ''}
+            </Text>
+            {typeof battery === 'number' && (
+              <View style={[styles.batteryBar, { width: Math.max(0, Math.min(100, battery)) * 0.28 }]} />
+            )}
+          </View>
           <TouchableOpacity
             style={[styles.mockBtn, mockMode && styles.mockBtnOn]}
             onPress={toggleMock}>
@@ -494,24 +545,57 @@ export default function App() {
         )}
       </View>
 
-      {/* 主仪表盘 */}
-      <View style={styles.dashboard}>
-        <View style={styles.dashItem}>
-          <Text style={styles.dashLabel}>困意指数</Text>
-          <Text style={[styles.dashValue, {
-            color: drowsiness > 70 ? '#FF5252' : drowsiness > 40 ? '#FFCA28' : '#00E676'
-          }]}>
-            {drowsiness}%
-          </Text>
-          <Text style={styles.dashSub}>
-            {drowsiness > 70 ? '⚠️ 疲劳' : drowsiness > 40 ? '😑 注意' : '😊 清醒'}
-          </Text>
+      {/* 架构调整 1：将音乐播放板块前置至信号栏下方，突出核心反馈业务 */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>🎵 冥想音乐</Text>
+        <Text style={styles.musicText}>{musicName}</Text>
+        <View style={styles.btnGroup}>
+          <TouchableOpacity style={styles.btnPurple} onPress={pickAndPlay}>
+            <Text style={styles.btnText}>选择音频</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.btnBlue, isPlaying && styles.btnRed]}
+            onPress={togglePlay}>
+            <Text style={styles.btnText}>{isPlaying ? '⏸️ 暂停' : '▶️ 播放'}</Text>
+          </TouchableOpacity>
         </View>
-        <View style={styles.dashDivider} />
-        <View style={styles.dashItem}>
-          <Text style={styles.dashLabel}>主导波段</Text>
-          <Text style={[styles.dashValue, { color: topBand.color }]}>{topBand.label}</Text>
-          <Text style={styles.dashSub}>{topBand.note} · {topBand.range}</Text>
+        <ProgressBar />
+      </View>
+
+      {/* 主仪表盘 (保留之前的 2x2 网格) */}
+      <View style={styles.dashboard}>
+        <View style={styles.dashRow}>
+          <View style={styles.dashItem}>
+            <Text style={styles.dashLabel}>困意指数</Text>
+            <Text style={[styles.dashValue, { color: drowsiness > 70 ? '#FF5252' : drowsiness > 40 ? '#FFCA28' : '#00E676' }]}>
+              {drowsiness}%
+            </Text>
+            <Text style={styles.dashSub}>{drowsiness > 70 ? '⚠️ 疲劳' : drowsiness > 40 ? '😑 注意' : '😊 清醒'}</Text>
+          </View>
+          <View style={styles.dashDivider} />
+          <View style={styles.dashItem}>
+            <Text style={styles.dashLabel}>主导波段</Text>
+            <Text style={[styles.dashValue, { color: topBand.color }]}>{topBand.label}</Text>
+            <Text style={styles.dashSub}>{topBand.note} · {topBand.range}</Text>
+          </View>
+        </View>
+        <View style={styles.dashHDivider} />
+        <View style={styles.dashRow}>
+          <View style={styles.dashItem}>
+            <Text style={styles.dashLabel}>HRV (心率变异性)</Text>
+            <Text style={[styles.dashValue, { color: typeof hrv === 'number' && hrv < 30 ? '#FFCA28' : '#3498DB' }]}>
+              {hrv}<Text style={styles.dashUnit}>ms</Text>
+            </Text>
+            <Text style={styles.dashSub}>副交感神经评估</Text>
+          </View>
+          <View style={styles.dashDivider} />
+          <View style={styles.dashItem}>
+            <Text style={styles.dashLabel}>血氧饱和度</Text>
+            <Text style={[styles.dashValue, { color: typeof spo2 === 'number' && spo2 < 95 ? (spo2 < 90 ? '#FF5252' : '#FFCA28') : '#00E676' }]}>
+              {spo2}<Text style={styles.dashUnit}>%</Text>
+            </Text>
+            <Text style={styles.dashSub}>{typeof spo2 === 'number' && spo2 < 95 ? '⚠️ 异常区间' : '供氧充足'}</Text>
+          </View>
         </View>
       </View>
 
@@ -519,7 +603,17 @@ export default function App() {
       <DrowsinessChart />
       <BandBars />
 
-      {/* 数据保存控制 */}
+      {/* 架构调整 2：设备连接管理紧贴底层控制与调试数据 */}
+      <TouchableOpacity style={styles.actionBtn} onPress={scanAndConnect}>
+        <Text style={styles.btnText}>📡 扫描并连接 Muse 头环</Text>
+      </TouchableOpacity>
+      {savedDeviceId && (
+        <TouchableOpacity style={styles.clearBtn} onPress={clearPairedDevice}>
+          <Text style={styles.clearBtnText}>🗑️ 清除配对: {savedDeviceId.substring(0, 10)}…</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* 架构调整 3：原始数据保存作为工程化调试选项置底 */}
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>💾 原始数据保存</Text>
         <Text style={styles.saveDesc}>
@@ -538,32 +632,6 @@ export default function App() {
           </Text>
         )}
       </View>
-
-      {/* 冥想音乐 */}
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>🎵 冥想音乐</Text>
-        <Text style={styles.musicText}>{musicName}</Text>
-        <View style={styles.btnGroup}>
-          <TouchableOpacity style={styles.btnPurple} onPress={pickAndPlay}>
-            <Text style={styles.btnText}>选择音频</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.btnBlue, isPlaying && styles.btnRed]}
-            onPress={togglePlay}>
-            <Text style={styles.btnText}>{isPlaying ? '⏸️ 暂停' : '▶️ 播放'}</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* 蓝牙操作 */}
-      <TouchableOpacity style={styles.actionBtn} onPress={scanAndConnect}>
-        <Text style={styles.btnText}>📡 扫描并连接 Muse 头环</Text>
-      </TouchableOpacity>
-      {savedDeviceId && (
-        <TouchableOpacity style={styles.clearBtn} onPress={clearPairedDevice}>
-          <Text style={styles.clearBtnText}>🗑️ 清除配对: {savedDeviceId.substring(0, 10)}…</Text>
-        </TouchableOpacity>
-      )}
 
       {/* 日志 */}
       <View style={styles.logBox}>
@@ -591,12 +659,15 @@ const styles = StyleSheet.create({
   signalText:    { fontSize: 13, fontWeight: '600', flex: 1 },
   signalPct:     { fontSize: 13, fontWeight: '700' },
   packetBadge:   { fontSize: 10, color: '#555', backgroundColor: '#1A1D27', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 10 },
-  dashboard:     { flexDirection: 'row', marginHorizontal: 20, marginBottom: 16, backgroundColor: '#1A1D27', borderRadius: 16, overflow: 'hidden' },
-  dashItem:      { flex: 1, padding: 18, alignItems: 'center' },
+  dashboard:     { marginHorizontal: 20, marginBottom: 16, backgroundColor: '#1A1D27', borderRadius: 16, overflow: 'hidden' },
+  dashRow:       { flexDirection: 'row' },
+  dashItem:      { flex: 1, padding: 16, alignItems: 'center', justifyContent: 'center' },
   dashDivider:   { width: 1, backgroundColor: '#2A2D3A', marginVertical: 16 },
-  dashLabel:     { fontSize: 13, color: '#888', marginBottom: 6 },
-  dashValue:     { fontSize: 30, fontWeight: '800' },
-  dashSub:       { fontSize: 12, color: '#666', marginTop: 4 },
+  dashHDivider:  { height: 1, backgroundColor: '#2A2D3A', marginHorizontal: 16 },
+  dashLabel:     { fontSize: 11, color: '#888', marginBottom: 4 },
+  dashValue:     { fontSize: 28, fontWeight: '800' },
+  dashUnit:      { fontSize: 14, fontWeight: '600', color: '#666' },
+  dashSub:       { fontSize: 10, color: '#666', marginTop: 2 },
   card:          { marginHorizontal: 20, marginBottom: 16, backgroundColor: '#1A1D27', borderRadius: 16, padding: 16 },
   sectionTitle:  { fontSize: 14, color: '#EAEAEA', fontWeight: '700', marginBottom: 14 },
   gridLine:      { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#2A2D3A' },

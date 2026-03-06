@@ -5,6 +5,7 @@ import os
 import csv
 from datetime import datetime
 import numpy as np
+from scipy.signal import find_peaks
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 
@@ -16,6 +17,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 SAMPLE_RATE   = 256
 EEG_PRIMARY   = '0013'
 EEG_CHANNELS  = ['0013', '0014', '0015', '0016']
+PPG_IR       = '0010'
+PPG_RED      = '0011'
+PPG_CHANNELS = [PPG_IR, PPG_RED]
 
 
 class SessionState:
@@ -88,6 +92,14 @@ def parse_eeg_packet(raw: bytes) -> list:
         i += 3
     return samples
 
+# ── PPG 解包器 (Muse 24-bit 特征值结构) ──
+def parse_ppg_packet(raw: bytes) -> list:
+    samples = []
+    if len(raw) < 20: return samples
+    for i in range(2, 20, 3):
+        samples.append((raw[i] << 16) | (raw[i+1] << 8) | raw[i+2])
+    return samples
+
 
 def band_power(fft_mag: np.ndarray, freqs: np.ndarray,
                f_lo: float, f_hi: float) -> float:
@@ -96,47 +108,53 @@ def band_power(fft_mag: np.ndarray, freqs: np.ndarray,
 
 
 def calculate_metrics(data: list) -> tuple:
-    DEFAULT_BANDS = {"delta": 25, "theta": 25, "alpha": 25, "beta": 25}
+    DEFAULT_BANDS = {"delta": 25, "theta": 25, "alpha": 25, "beta": 25, "gamma": 25}
     if len(data) < SAMPLE_RATE:
         return 0, 0, DEFAULT_BANDS
 
     arr = np.array(data[:SAMPLE_RATE], dtype=np.float32)
 
-    # ── 信号质量 ──────────────────────────────────────────────
+    # ── 信号质量 (红队逻辑：工频干扰劫持过滤) ──────────────────
     std = float(np.std(arr))
     p2p = float(np.ptp(arr))
     rms = float(np.sqrt(np.mean(arr ** 2)))
+    
+    win   = np.hanning(len(arr))
+    fft   = np.abs(np.fft.rfft(arr * win))
+    freqs = np.fft.rfftfreq(len(arr), 1.0 / SAMPLE_RATE)
+    
+    pli_idx = np.where(((freqs >= 48) & (freqs <= 52)) | ((freqs >= 58) & (freqs <= 62)))[0]
+    pli_power = np.sum(fft[pli_idx] ** 2) if len(pli_idx) else 0
+    total_power = np.sum(fft ** 2) + 1e-9
 
-    if std < 0.5:
-        sig_q = 3          # 电极脱落/完全平坦
+    if std < 0.5 or p2p < 1:
+        sig_q = 0          # 物理脱落 / 平坦
+    elif (pli_power / total_power) > 0.4:
+        sig_q = 10         # 极高频干扰 (接触不良导致人体成为天线)
     elif p2p > 600 or std > 400:
-        sig_q = 15         # 严重运动/眼动伪迹
-    elif p2p > 300 or std > 150:
-        sig_q = 45         # 轻度伪迹
-    elif rms < 3:
-        sig_q = 30         # 信号过弱
+        sig_q = 15         # 动作/眼动剧烈伪迹
     else:
-        # 正常 EEG RMS 典型 10-80 µV，最优区间 10-50 µV
         deviation = max(0, abs(rms - 30) - 20)
         sig_q = max(60, min(100, int(100 - deviation * 1.2)))
 
     # ── 频谱（Hanning 窗）────────────────────────────────────
-    win   = np.hanning(len(arr))
-    fft   = np.abs(np.fft.rfft(arr * win))
+    # win 已在信号质量评估中计算
     freqs = np.fft.rfftfreq(len(arr), 1.0 / SAMPLE_RATE)
 
     delta_p = band_power(fft, freqs, 0.5,  4.0)
     theta_p = band_power(fft, freqs, 4.0,  8.0)
     alpha_p = band_power(fft, freqs, 8.0, 13.0)
     beta_p  = band_power(fft, freqs, 13.0, 30.0)
+    gamma_p = band_power(fft, freqs, 30.0, 50.0)
 
-    total = max(delta_p + theta_p + alpha_p + beta_p, 1e-9)
+    total = max(delta_p + theta_p + alpha_p + beta_p + gamma_p, 1e-9)
 
     bands = {
         "delta": int(round(delta_p / total * 100)),
         "theta": int(round(theta_p / total * 100)),
         "alpha": int(round(alpha_p / total * 100)),
         "beta":  int(round(beta_p  / total * 100)),
+        "gamma": int(round(gamma_p / total * 100)),
     }
     bands["alpha"] += 100 - sum(bands.values())   # 消除舍入误差
 
@@ -153,12 +171,39 @@ def calculate_metrics(data: list) -> tuple:
     return sig_q, drowsiness, bands
 
 
+# ── HRV & SpO2 计算 ──
+def calculate_ppg_metrics(ir_data: list, red_data: list) -> tuple:
+    if len(ir_data) < 64 or len(red_data) < 64: return None, None
+    arr_ir = np.array(ir_data[-256:], dtype=np.float32)
+    arr_red = np.array(red_data[-256:], dtype=np.float32)
+
+    # SpO2: Ratio of Ratios (AC/DC)
+    ir_ac, ir_dc = np.std(arr_ir), np.mean(arr_ir)
+    red_ac, red_dc = np.std(arr_red), np.mean(arr_red)
+    spo2 = 0
+    if ir_dc > 0 and red_dc > 0 and ir_ac > 0:
+        r = (red_ac / red_dc) / (ir_ac / ir_dc)
+        spo2 = int(max(80, min(100, 110 - 25 * r)))
+
+    # HRV: RMSSD 基准
+    peaks, _ = find_peaks(-arr_ir, distance=20) # 取光吸收波谷等效于收缩波峰
+    hrv = 0
+    if len(peaks) >= 2:
+        rr_intervals = np.diff(peaks) * (1000.0 / 64.0) # PPG 采样率约 64Hz
+        if len(rr_intervals) > 1:
+            hrv = int(np.sqrt(np.mean(np.diff(rr_intervals)**2)))
+            hrv = min(200, max(10, hrv)) # 临床封顶钳制
+
+    return hrv, spo2
+
 @app.websocket("/ws/eeg")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     ctrl_buf = ""
     session  = SessionState()
-    bufs     = {ch: [] for ch in EEG_CHANNELS}
+    bufs     = {ch: [] for ch in EEG_CHANNELS + PPG_CHANNELS}
+    sys_hrv  = 0
+    sys_spo2 = 0
     print("🟢 [后端] 客户端已连接")
 
     try:
@@ -238,11 +283,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 sig_q, drowsy, bands = calculate_metrics(window)
                 log_metrics(sig_q, drowsy, bands)
 
+                # 预定义多模态合约字段，保障未来 muse_ppg_heart_rate.py 等算法模块无缝挂载
                 await websocket.send_json({
                     "type":       "metrics",
                     "signal":     sig_q,
                     "drowsiness": drowsy,
                     "bands":      bands,
+                    "hrv":        sys_hrv if sys_hrv > 0 else '--',
+                    "spo2":       sys_spo2 if sys_spo2 > 0 else '--',
                     "packets_rx": session.packet_total,
                 })
                 # 50% 重叠滑动窗口 → 约 0.5 秒更新一次
