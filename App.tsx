@@ -11,7 +11,8 @@ import TrackPlayer, {
   Capability, AppKilledPlaybackBehavior, useProgress,
 } from 'react-native-track-player';
 import * as DocumentPicker from '@react-native-documents/picker';
-import * as FileSystem from 'expo-file-system';
+// @ts-ignore
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import Zip from 'react-native-zip-archive';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
@@ -157,6 +158,8 @@ export default function App() {
 
   // 保存
   const [isSaving,  setIsSaving]  = useState(false);
+  const isSavingRef = useRef(false);
+  useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
   const [savePath,  setSavePath]  = useState('');
   const [denseMins, setDenseMins] = useState(30);
 
@@ -226,14 +229,14 @@ export default function App() {
       const SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000;
 
       for (const file of files) {
-        // 仅处理应用自己产生的日志与压缩包
         if (file.endsWith('.csv') || file.endsWith('.zip')) {
+          const fileUri = file.startsWith('file://') ? file : dirUri + file;
           // @ts-ignore
-          const fileInfo = await FileSystem.getInfoAsync(dirUri + file);
+          const fileInfo = await FileSystem.getInfoAsync(fileUri);
           // @ts-ignore
-          if (fileInfo.exists && (now - fileInfo.modificationTime * 1000) > SEVEN_DAYS_MS) {
+          if (fileInfo.exists && !fileInfo.isDirectory && (now - (fileInfo.modificationTime || 0) * 1000) > SEVEN_DAYS_MS) {
             // @ts-ignore
-            await FileSystem.deleteAsync(dirUri + file, { idempotent: true });
+            await FileSystem.deleteAsync(fileUri, { idempotent: true });
             console.log(`🗑️ 存储防爆：已清理过期日志 ${file}`);
           }
         }
@@ -244,19 +247,21 @@ export default function App() {
   };
 
   const createNewLogFile = async () => {
-    const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
-    // @ts-ignore
-    const uri = `${FileSystem.documentDirectory}muse_log_${timeStr}_part${filePartIndex.current}.csv`;
-    // @ts-ignore
-    await FileSystem.writeAsStringAsync(uri, 'timestamp,channel,data\n', { encoding: FileSystem.EncodingType.UTF8 });
-    logFileUri.current = uri;
-    addLog(`📄 创建数据分片: part${filePartIndex.current}`);
+    try {
+      const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+      // @ts-ignore
+      const uri = `${FileSystem.documentDirectory}muse_log_${timeStr}_part${filePartIndex.current}.csv`;
+      // @ts-ignore
+      await FileSystem.writeAsStringAsync(uri, 'timestamp,channel,data\n', { encoding: FileSystem.EncodingType.UTF8 });
+      logFileUri.current = uri;
+      addLog(`📄 创建数据分片: part${filePartIndex.current}`);
+    } catch (e) {
+      addLog(`🔴 创建文件失败: ${e}`);
+    }
   };
 
   const initLocalFileSystem = async () => {
-    // 启动前卫检查，排空历史垃圾
     await cleanOldLogs();
-    
     filePartIndex.current = 1;
     sessionStartTime.current = Date.now();
     await createNewLogFile();
@@ -276,14 +281,17 @@ export default function App() {
         append: true,
       });
 
-      // 分片检查：如果当前文件写入超过 1 小时，立刻切片
-      if (Date.now() - sessionStartTime.current > 3600 * 1000) {
+      // @ts-ignore
+      const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
+      // @ts-ignore
+      if (fileInfo.exists && fileInfo.size && fileInfo.size > 10 * 1024 * 1024) { // 10MB 切片
         filePartIndex.current += 1;
         sessionStartTime.current = Date.now();
         await createNewLogFile();
       }
     } catch (e) {
       addLog('🔴 本地写入异常');
+      fileBuffer.current = chunk + fileBuffer.current; // 失败则回退缓冲区
     }
   };
 
@@ -312,16 +320,18 @@ export default function App() {
   };
 
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
-    // 1. 原始数据入库 (保持离线保存需求)
-    const timestamp = new Date().toISOString();
-    fileBuffer.current += `${timestamp},${channel},${base64Data}\n`;
-    
-    // 当缓冲区达到一定阈值（如500条）时刷入闪存，避免频繁 IO
-    if (fileBuffer.current.length > 10240) {
-      flushBufferToFile();
+    // 1. 原始数据入库 (仅在开启采集时保存到缓冲区)
+    if (isSavingRef.current) {
+      const timestamp = new Date().toISOString();
+      fileBuffer.current += `${timestamp},${channel},${base64Data}\n`;
+      
+      // 当缓冲区达到一定阈值（如10KB）时刷入闪存，避免频繁 IO
+      if (fileBuffer.current.length > 10240) {
+        flushBufferToFile();
+      }
     }
 
-    // 2. 实时 UI 反馈 (仅处理 AF7/AF8 通道以节省性能)
+    // 2. 实时 UI 反馈 (始终运行，用于波形展示)
     if (channel === '0014' || channel === '0015') {
       const samples = decodeEEG(base64Data);
       processThetaWave(samples);
@@ -448,10 +458,12 @@ export default function App() {
     try {
       // @ts-ignore
       const documentDir = FileSystem.documentDirectory;
+      if (!documentDir) {
+        addLog('🔴 无法访问文档目录');
+        return;
+      }
       // @ts-ignore
-      const files = await FileSystem.readDirectoryAsync(documentDir!);
-      
-      // 筛选出所有 muse_log 开头的 CSV 文件
+      const files = await FileSystem.readDirectoryAsync(documentDir);
       const dataFiles = files.filter(f => f.startsWith('muse_log_') && f.endsWith('.csv'));
       
       if (dataFiles.length === 0) {
@@ -459,26 +471,26 @@ export default function App() {
         return;
       }
 
+      addLog(`📦 准备导出 ${dataFiles.length} 个文件...`);
+
       if (dataFiles.length === 1) {
-        // 如果只有一个文件，可以直接分享
         const fileUri = `${documentDir}${dataFiles[0]}`;
         // @ts-ignore
-        if ((await FileSystem.getInfoAsync(fileUri)).exists) {
+        const fileInfo = await FileSystem.getInfoAsync(fileUri);
+        if (fileInfo.exists) {
           await Sharing.shareAsync(fileUri);
-          addLog(`📤 已导出数据文件: ${dataFiles[0]}`);
+          addLog(`📤 已导出: ${dataFiles[0]}`);
         } else {
-          addLog('⚠️ 文件不存在');
+          addLog('⚠️ 文件丢失');
         }
       } else {
-        // 多个文件，需要打包成ZIP
-        const zipFileName = `muse_data_${new Date().toISOString().slice(0, 19)}.zip`;
-        const zipSourcePath = `${documentDir}temp_zip_source/`;
+        const zipFileName = `muse_export_${new Date().getTime()}.zip`;
+        const zipSourcePath = `${documentDir}temp_export/`;
+        const zipDestPath = `${documentDir}${zipFileName}`;
         
-        // 创建临时目录
         // @ts-ignore
         await FileSystem.makeDirectoryAsync(zipSourcePath, { intermediates: true });
         
-        // 复制所有CSV文件到临时目录
         for (const file of dataFiles) {
           // @ts-ignore
           await FileSystem.copyAsync({
@@ -487,18 +499,15 @@ export default function App() {
           });
         }
         
-        const zipDestPath = `${documentDir}${zipFileName}`;
         await Zip.zip(zipSourcePath, zipDestPath);
-        
-        // 清理临时目录
         // @ts-ignore
-        await FileSystem.deleteAsync(zipSourcePath);
+        await FileSystem.deleteAsync(zipSourcePath, { idempotent: true });
         
         await Sharing.shareAsync(zipDestPath);
         addLog(`📤 已导出数据包: ${zipFileName}`);
       }
-    } catch (e) {
-      addLog(`🔴 导出失败: ${e}`);
+    } catch (e: any) {
+      addLog(`🔴 导出失败: ${e.message || e}`);
     }
   };
 
@@ -582,19 +591,18 @@ export default function App() {
           ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
         }
 
-        // 解析佩戴质量 (Horseshoe)
-        const hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[(\d+),(\d+),(\d+),(\d+)\]/);
+        // 解析佩戴质量 (Horseshoe) - 改进正则，支持无空格格式
+        const hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[([124]),([124]),([124]),([124])\]/);
         if (hsMatch) {
           const [tp9, af7, af8, tp10] = hsMatch.slice(1).map(v => {
-            // Muse 原始值：1=好, 2=中, 4=差。转换成百分比供 UI 使用
             const vInt = parseInt(v);
             return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
           });
           setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
-          // 计算综合信号分层
           const avg = (tp9 + af7 + af8 + tp10) / 4;
           updateSignal(avg);
-          ctrlBuf = ctrlBuf.replace(/"hs":\s*\[\d+,\d+,\d+,\d+\]/, '');
+          // 使用正则替换掉匹配到的内容
+          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[[124],[124],[124],[124]\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
@@ -619,8 +627,8 @@ export default function App() {
       addLog('🛡️ 订阅 EEG + PPG 通道…');
       [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
         device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (_, char) => {
-          if (char?.value && isSaving) {
-            // 将数据分发到本地处理管线
+          if (char?.value) {
+            // 始终将数据分发到处理管线，内部判断是否保存
             handleMuseDataPacket(uuid.substring(4, 8), char.value);
           }
         });
