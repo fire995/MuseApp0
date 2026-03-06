@@ -75,7 +75,8 @@ export const analyzeFrequency = (samples: number[], sampleRate: number = 256): {
   }
   
   // 执行FFT
-  const transformed = fft.transform(complexArray);
+  const transformed = fft.createComplexArray();
+  fft.transform(transformed, complexArray);
   
   // 计算功率谱密度
   const magnitude = new Array(n / 2).fill(0);

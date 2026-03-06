@@ -1,33 +1,8 @@
-/**
- * Muse EEG 数据解码器
- * 将 Muse 头环传输的 Base64 编码数据解码为微伏(μV)单位的原始 EEG 信号
- */
-export const decodeEEG = (base64: string): number[] => {
-  const buf = Buffer.from(base64, 'base64');
-  const samples: number[] = [];
-  // 跳过前 2 字节序号
-  let bitIndex = 16; 
-  for (let i = 0; i < 12; i++) {
-    // 提取 12-bit 采样
-    const bytePos = Math.floor(bitIndex / 8);
-    const bitOff  = bitIndex % 8;
-    // 跨字节读取 12 位
-    const val = (
-      (buf[bytePos] << 16 | buf[bytePos + 1] << 8 | buf[bytePos + 2]) 
-      >> (24 - 12 - bitOff)
-    ) & 0xFFF;
-    
-    // 转换为微伏 (公式：(val - 2048) * 0.488)
-    samples.push((val - 2048) * 0.488);
-    bitIndex += 12;
-  }
-  return samples;
-};
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Platform,
   PermissionsAndroid, TouchableOpacity, Dimensions,
-  AppState
+  AppState, Linking
 } from 'react-native';
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
@@ -41,12 +16,12 @@ import * as Sharing from 'expo-sharing';
 import Zip from 'react-native-zip-archive';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { decodeEEG } from './utils/MuseDecoder';
+import { decodeEEG, analyzeFrequency } from './utils/MuseDecoder';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
 
 // 注册前台任务
-ReactNativeForegroundService.register();
+ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => {} } });
 
 // ── 常量 ─────────────────────────────────────────────────────────
 const bleManager = new BleManager();
@@ -242,8 +217,10 @@ export default function App() {
   // ── 本地存储管理器 ────────────────────────────────────────────────
   const cleanOldLogs = async () => {
     try {
+      // @ts-ignore
       const dirUri = FileSystem.documentDirectory;
       if (!dirUri) return;
+      // @ts-ignore
       const files = await FileSystem.readDirectoryAsync(dirUri);
       const now = Date.now();
       const SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000;
@@ -251,8 +228,11 @@ export default function App() {
       for (const file of files) {
         // 仅处理应用自己产生的日志与压缩包
         if (file.endsWith('.csv') || file.endsWith('.zip')) {
+          // @ts-ignore
           const fileInfo = await FileSystem.getInfoAsync(dirUri + file);
+          // @ts-ignore
           if (fileInfo.exists && (now - fileInfo.modificationTime * 1000) > SEVEN_DAYS_MS) {
+            // @ts-ignore
             await FileSystem.deleteAsync(dirUri + file, { idempotent: true });
             console.log(`🗑️ 存储防爆：已清理过期日志 ${file}`);
           }
@@ -265,7 +245,9 @@ export default function App() {
 
   const createNewLogFile = async () => {
     const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+    // @ts-ignore
     const uri = `${FileSystem.documentDirectory}muse_log_${timeStr}_part${filePartIndex.current}.csv`;
+    // @ts-ignore
     await FileSystem.writeAsStringAsync(uri, 'timestamp,channel,data\n', { encoding: FileSystem.EncodingType.UTF8 });
     logFileUri.current = uri;
     addLog(`📄 创建数据分片: part${filePartIndex.current}`);
@@ -287,7 +269,9 @@ export default function App() {
     fileBuffer.current = ''; 
     
     try {
+      // @ts-ignore
       await FileSystem.writeAsStringAsync(logFileUri.current, chunk, {
+        // @ts-ignore
         encoding: FileSystem.EncodingType.UTF8,
         append: true,
       });
@@ -416,7 +400,7 @@ export default function App() {
         title: 'Muse BCI 采集中',
         message: '正在后台接收并存储脑波数据...',
         icon: 'ic_launcher',
-        setOnlyAlertOnce: true,
+        setOnlyAlertOnce: "true",
         color: '#000000',
         visibility: 'public',
       });
@@ -445,60 +429,72 @@ export default function App() {
   };
 
   // ── 导出保存的文件 ──────────────────────────────────────────────
+  const loadSavedFile = async () => {
+    try {
+      // @ts-ignore
+      logFileUri.current = `${FileSystem.documentDirectory}${fileName}`;
+      setSavePath(fileName);
+      addLog(`📁 加载保存路径: ${fileName}`);
+    } catch (e) {
+      addLog(`🔴 加载文件失败: ${e}`);
+    }
+  };
+
   const exportSavedFile = async () => {
-    if (fileBuffer.current.length > 0) {
-      // 确保所有缓冲区数据都已写入文件
-      await flushBufferToFile();
-    }
-
-    // 获取所有数据文件
-    const documentDir = FileSystem.documentDirectory;
-    const files = await FileSystem.readDirectoryAsync(documentDir!);
-    const dataFiles = files.filter(f => f.startsWith('muse_log_') && f.endsWith('.csv'));
-
-    if (dataFiles.length === 0) {
-      addLog('⚠️ 没有找到数据文件');
-      return;
-    }
-
-    if (dataFiles.length === 1) {
-      // 如果只有一个文件，可以直接分享
-      const fileUri = `${documentDir}${dataFiles[0]}`;
-      if (await FileSystem.getInfoAsync(fileUri).exists) {
-        await Sharing.shareAsync(fileUri);
-        addLog(`📤 已导出数据文件: ${dataFiles[0]}`);
-      } else {
-        addLog('⚠️ 文件不存在');
+    try {
+      // @ts-ignore
+      const documentDir = FileSystem.documentDirectory;
+      // @ts-ignore
+      const files = await FileSystem.readDirectoryAsync(documentDir!);
+      
+      // 筛选出所有 muse_log 开头的 CSV 文件
+      const dataFiles = files.filter(f => f.startsWith('muse_log_') && f.endsWith('.csv'));
+      
+      if (dataFiles.length === 0) {
+        addLog('⚠️ 没有可导出的数据文件');
+        return;
       }
-    } else {
-      // 多个文件，需要打包成ZIP
-      try {
-        const zipSourcePath = `${documentDir}temp_zip_source`;
-        const zipTargetPath = `${documentDir}muse_data_collection.zip`;
 
+      if (dataFiles.length === 1) {
+        // 如果只有一个文件，可以直接分享
+        const fileUri = `${documentDir}${dataFiles[0]}`;
+        // @ts-ignore
+        if ((await FileSystem.getInfoAsync(fileUri)).exists) {
+          await Sharing.shareAsync(fileUri);
+          addLog(`📤 已导出数据文件: ${dataFiles[0]}`);
+        } else {
+          addLog('⚠️ 文件不存在');
+        }
+      } else {
+        // 多个文件，需要打包成ZIP
+        const zipFileName = `muse_data_${new Date().toISOString().slice(0, 19)}.zip`;
+        const zipSourcePath = `${documentDir}temp_zip_source/`;
+        
         // 创建临时目录
+        // @ts-ignore
         await FileSystem.makeDirectoryAsync(zipSourcePath, { intermediates: true });
-
+        
         // 复制所有CSV文件到临时目录
         for (const file of dataFiles) {
+          // @ts-ignore
           await FileSystem.copyAsync({
             from: `${documentDir}${file}`,
-            to: `${zipSourcePath}/${file}`
+            to: `${zipSourcePath}${file}`
           });
         }
-
-        // 压缩临时目录
-        await Zip.zip(`${zipSourcePath}`, zipTargetPath);
-
-        // 删除临时目录
+        
+        const zipDestPath = `${documentDir}${zipFileName}`;
+        await Zip.zip(zipSourcePath, zipDestPath);
+        
+        // 清理临时目录
+        // @ts-ignore
         await FileSystem.deleteAsync(zipSourcePath);
-
-        // 分享ZIP文件
-        await Sharing.shareAsync(zipTargetPath);
-        addLog(`📦 已打包 ${dataFiles.length} 个数据分片并导出`);
-      } catch (error) {
-        addLog(`❌ 打包失败: ${(error as Error).message}`);
+        
+        await Sharing.shareAsync(zipDestPath);
+        addLog(`📤 已导出数据包: ${zipFileName}`);
       }
+    } catch (e) {
+      addLog(`🔴 导出失败: ${e}`);
     }
   };
 
