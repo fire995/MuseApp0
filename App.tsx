@@ -265,6 +265,11 @@ export default function App() {
     filePartIndex.current = 1;
     sessionStartTime.current = Date.now();
     await createNewLogFile();
+    
+    // 设置默认保存路径
+    const defaultFileName = 'muse_data.csv';
+    setSavePath(defaultFileName);
+    addLog(`📁 文件系统已初始化`);
   };
 
   const flushBufferToFile = async () => {
@@ -297,9 +302,13 @@ export default function App() {
 
   // 定义一个简单的 4-8Hz 带通近似逻辑（或直接显示滤波后的原始波形）
   const processThetaWave = (rawSamples: number[]) => {
-    // 简易下采样：每 12 个点取 1 个，降低绘图压力
-    const displayPoint = rawSamples[0]; 
-    setThetaWave(prev => [...prev, displayPoint].slice(-60));
+    if (rawSamples.length === 0) return;
+    
+    // 使用所有样本点，而不是只取第一个
+    setThetaWave(prev => {
+      const newData = [...prev, ...rawSamples];
+      return newData.slice(-120); // 保留最近 120 个点
+    });
   };
 
   // 添加困意分析函数
@@ -320,27 +329,31 @@ export default function App() {
   };
 
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
-    // 1. 原始数据入库 (仅在开启采集时保存到缓冲区)
-    if (isSavingRef.current) {
+    // 1. 保存原始数据（仅在采集时）
+    if (isSavingRef.current && logFileUri.current) {
       const timestamp = new Date().toISOString();
       fileBuffer.current += `${timestamp},${channel},${base64Data}\n`;
       
-      // 当缓冲区达到一定阈值（如10KB）时刷入闪存，避免频繁 IO
       if (fileBuffer.current.length > 10240) {
         flushBufferToFile();
       }
     }
 
-    // 2. 实时 UI 反馈 (始终运行，用于波形展示)
+    // 2. 实时解码和显示（始终运行）
     if (channel === '0014' || channel === '0015') {
-      const samples = decodeEEG(base64Data);
-      processThetaWave(samples);
-      
-      // 分析频域特征，用于困意检测
-      const { theta, alpha } = analyzeFrequency(samples);
-      analyzeDrowsiness(theta, alpha);
-      
-      setPacketsRx(prev => prev + 1);
+      try {
+        const samples = decodeEEG(base64Data);
+        if (samples.length > 0) {
+          processThetaWave(samples);
+          // 频域分析
+          const { theta, alpha } = analyzeFrequency(samples);
+          analyzeDrowsiness(theta, alpha);
+          
+          setPacketsRx(prev => prev + 1);
+        }
+      } catch (e) {
+        console.warn('数据处理失败:', e);
+      }
     }
   };
 
@@ -456,12 +469,16 @@ export default function App() {
 
   const exportSavedFile = async () => {
     try {
+      // 先刷新缓冲区
+      await flushBufferToFile();
+      
       // @ts-ignore
       const documentDir = FileSystem.documentDirectory;
       if (!documentDir) {
         addLog('🔴 无法访问文档目录');
         return;
       }
+      
       // @ts-ignore
       const files = await FileSystem.readDirectoryAsync(documentDir);
       const dataFiles = files.filter(f => f.startsWith('muse_log_') && f.endsWith('.csv'));
@@ -471,40 +488,20 @@ export default function App() {
         return;
       }
 
-      addLog(`📦 准备导出 ${dataFiles.length} 个文件...`);
+      addLog(`📦 找到 ${dataFiles.length} 个数据文件`);
 
-      if (dataFiles.length === 1) {
-        const fileUri = `${documentDir}${dataFiles[0]}`;
-        // @ts-ignore
-        const fileInfo = await FileSystem.getInfoAsync(fileUri);
-        if (fileInfo.exists) {
-          await Sharing.shareAsync(fileUri);
-          addLog(`📤 已导出: ${dataFiles[0]}`);
-        } else {
-          addLog('⚠️ 文件丢失');
-        }
+      // 简化：直接导出第一个文件（最新的）
+      const latestFile = dataFiles.sort().reverse()[0];
+      const fileUri = `${documentDir}${latestFile}`;
+      
+      // @ts-ignore
+      const fileInfo = await FileSystem.getInfoAsync(fileUri);
+      // @ts-ignore
+      if (fileInfo.exists) {
+        await Sharing.shareAsync(fileUri);
+        addLog(`📤 已导出: ${latestFile}`);
       } else {
-        const zipFileName = `muse_export_${new Date().getTime()}.zip`;
-        const zipSourcePath = `${documentDir}temp_export/`;
-        const zipDestPath = `${documentDir}${zipFileName}`;
-        
-        // @ts-ignore
-        await FileSystem.makeDirectoryAsync(zipSourcePath, { intermediates: true });
-        
-        for (const file of dataFiles) {
-          // @ts-ignore
-          await FileSystem.copyAsync({
-            from: `${documentDir}${file}`,
-            to: `${zipSourcePath}${file}`
-          });
-        }
-        
-        await Zip.zip(zipSourcePath, zipDestPath);
-        // @ts-ignore
-        await FileSystem.deleteAsync(zipSourcePath, { idempotent: true });
-        
-        await Sharing.shareAsync(zipDestPath);
-        addLog(`📤 已导出数据包: ${zipFileName}`);
+        addLog('⚠️ 文件不存在');
       }
     } catch (e: any) {
       addLog(`🔴 导出失败: ${e.message || e}`);

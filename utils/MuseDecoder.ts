@@ -2,125 +2,86 @@ import { Buffer } from 'buffer';
 // @ts-ignore
 import FFT from 'fft.js';
 
-// 核心逻辑：Muse 2 每包 20 字节，包含 1 个 16位序号和 12 个 12位采样点
-export const decodeEEG = (base64: string): number[] => {
-  const buf = Buffer.from(base64, 'base64');
-  const samples: number[] = [];
-  // 跳过前 2 字节序号
-  let bitIndex = 16; 
-  for (let i = 0; i < 12; i++) {
-    // 提取 12-bit 采样
-    const bytePos = Math.floor(bitIndex / 8);
-    const bitOff  = bitIndex % 8;
-    // 跨字节读取 12 位
-    const val = (
-      (buf[bytePos] << 16 | buf[bytePos + 1] << 8 | buf[bytePos + 2]) 
-      >> (24 - 12 - bitOff)
-    ) & 0xFFF;
+/**
+ * 解码 Muse EEG 数据包
+ * Muse 使用 12-bit 压缩格式，每3字节编码2个12-bit样本
+ */
+export function decodeEEG(base64Data: string): number[] {
+  try {
+    const buffer = Buffer.from(base64Data, 'base64');
+    const samples: number[] = [];
     
-    // 转换为微伏 (公式：(val - 2048) * 0.488)
-    samples.push((val - 2048) * 0.488);
-    bitIndex += 12;
-  }
-  return samples;
-};
-
-// 简单的4-8Hz带通滤波器（Theta波段）
-export const filterThetaBand = (samples: number[]): number[] => {
-  // 为了简化处理，这里只是简单地对数据进行平滑处理
-  // 在实际应用中，可以使用更复杂的滤波器算法
-  const smoothed: number[] = [];
-  for (let i = 0; i < samples.length; i++) {
-    const start = Math.max(0, i - 2);
-    const end = Math.min(samples.length - 1, i + 2);
-    let sum = 0;
-    for (let j = start; j <= end; j++) {
-      sum += samples[j];
+    // Muse 数据格式：每 3 字节编码 2 个 12-bit 样本
+    for (let i = 0; i < buffer.length - 2; i += 3) {
+      const byte1 = buffer[i];
+      const byte2 = buffer[i + 1];
+      const byte3 = buffer[i + 2];
+      
+      // 解码第一个 12-bit 样本
+      const sample1 = ((byte1 << 4) | (byte2 >> 4)) & 0xFFF;
+      // 解码第二个 12-bit 样本
+      const sample2 = (((byte2 & 0x0F) << 8) | byte3) & 0xFFF;
+      
+      // 转换为有符号值并缩放到 μV
+      const voltage1 = (sample1 > 2047 ? sample1 - 4096 : sample1) * 0.48828125;
+      const voltage2 = (sample2 > 2047 ? sample2 - 4096 : sample2) * 0.48828125;
+      
+      samples.push(voltage1, voltage2);
     }
-    smoothed.push(sum / (end - start + 1));
+    
+    return samples;
+  } catch (e) {
+    console.warn('EEG 解码失败:', e);
+    return [];
   }
-  return smoothed;
-};
+}
 
-// 简单的8-13Hz带通滤波器（Alpha波段）
-export const filterAlphaBand = (samples: number[]): number[] => {
-  // 这里同样使用简单的平滑处理
-  const smoothed: number[] = [];
-  for (let i = 0; i < samples.length; i++) {
-    const start = Math.max(0, i - 1);
-    const end = Math.min(samples.length - 1, i + 1);
-    let sum = 0;
-    for (let j = start; j <= end; j++) {
-      sum += samples[j];
+/**
+ * 分析频域特征（Theta 和 Alpha 波段能量）
+ */
+export function analyzeFrequency(samples: number[]): { theta: number; alpha: number } {
+  if (samples.length < 16) {
+    return { theta: 0, alpha: 0 };
+  }
+  
+  try {
+    // 使用最近的 2^n 个样本进行 FFT
+    const fftSize = Math.pow(2, Math.floor(Math.log2(samples.length)));
+    const fft = new FFT(fftSize);
+    const input = samples.slice(0, fftSize);
+    
+    // 归一化输入
+    const mean = input.reduce((a, b) => a + b, 0) / input.length;
+    const normalized = input.map(v => v - mean);
+    
+    const out = fft.createComplexArray();
+    fft.realTransform(out, normalized);
+    
+    // 计算功率谱
+    const power: number[] = [];
+    for (let i = 0; i < out.length / 2; i += 2) {
+      const real = out[i];
+      const imag = out[i + 1];
+      power.push(Math.sqrt(real * real + imag * imag));
     }
-    smoothed.push(sum / (end - start + 1));
+    
+    // 假设采样率 256Hz，计算频段索引
+    const samplingRate = 256;
+    const freqResolution = samplingRate / fftSize;
+    
+    // Theta: 4-8 Hz
+    const thetaStart = Math.floor(4 / freqResolution);
+    const thetaEnd = Math.ceil(8 / freqResolution);
+    const thetaEnergy = power.slice(thetaStart, thetaEnd).reduce((a, b) => a + b, 0);
+    
+    // Alpha: 8-13 Hz
+    const alphaStart = Math.floor(8 / freqResolution);
+    const alphaEnd = Math.ceil(13 / freqResolution);
+    const alphaEnergy = power.slice(alphaStart, alphaEnd).reduce((a, b) => a + b, 0);
+    
+    return { theta: thetaEnergy, alpha: alphaEnergy };
+  } catch (e) {
+    console.warn('频域分析失败:', e);
+    return { theta: 0, alpha: 0 };
   }
-  return smoothed;
-};
-
-// 使用FFT进行频域分析
-export const analyzeFrequency = (samples: number[], sampleRate: number = 256): { theta: number, alpha: number } => {
-  // 确保样本数量是2的幂
-  const n = nextPowerOf2(samples.length);
-  const fft = new FFT(n);
-  
-  // 补零到n长度
-  const paddedSamples = [...samples, ...new Array(n - samples.length).fill(0)];
-  
-  // 创建复数数组
-  const complexArray = fft.createComplexArray();
-  for (let i = 0; i < n; i++) {
-    complexArray[2 * i] = paddedSamples[i] || 0;  // 实部
-    complexArray[2 * i + 1] = 0;                 // 虚部
-  }
-  
-  // 执行FFT
-  const transformed = fft.createComplexArray();
-  fft.transform(transformed, complexArray);
-  
-  // 计算功率谱密度
-  const magnitude = new Array(n / 2).fill(0);
-  for (let i = 0; i < n / 2; i++) {
-    magnitude[i] = Math.sqrt(
-      Math.pow(transformed[2 * i], 2) + 
-      Math.pow(transformed[2 * i + 1], 2)
-    );
-  }
-  
-  // 计算4-8Hz范围内的能量（Theta波段）
-  const binSize = sampleRate / n;
-  const thetaLowFreqBin = Math.floor(4 / binSize);
-  const thetaHighFreqBin = Math.floor(8 / binSize);
-  
-  // 计算8-13Hz范围内的能量（Alpha波段）
-  const alphaLowFreqBin = Math.floor(8 / binSize);
-  const alphaHighFreqBin = Math.floor(13 / binSize);
-  
-  let thetaEnergy = 0;
-  let alphaEnergy = 0;
-  let totalEnergy = 0;
-  
-  for (let i = 1; i < magnitude.length; i++) { // 跳过直流分量
-    totalEnergy += magnitude[i];
-    if (i >= thetaLowFreqBin && i <= thetaHighFreqBin) {
-      thetaEnergy += magnitude[i];
-    }
-    if (i >= alphaLowFreqBin && i <= alphaHighFreqBin) {
-      alphaEnergy += magnitude[i];
-    }
-  }
-  
-  return {
-    theta: totalEnergy > 0 ? thetaEnergy / totalEnergy : 0,
-    alpha: totalEnergy > 0 ? alphaEnergy / totalEnergy : 0
-  };
-};
-
-// 计算下一个2的幂
-const nextPowerOf2 = (n: number): number => {
-  let power = 1;
-  while (power < n) {
-    power <<= 1;
-  }
-  return power;
-};
+}
