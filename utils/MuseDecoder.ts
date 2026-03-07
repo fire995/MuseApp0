@@ -88,44 +88,53 @@ export function analyzeFrequency(samples: number[]): { theta: number; alpha: num
 }
 
 /**
- * 评估信号质量（基于 1 秒内的原始 EEG 数据）
- * 逻辑参考后端：
- * 1. 样本数 < 64 时认为数据不足，返回 50
- * 2. 移除均值（简单的高通滤波效果）
- * 3. 超过 200µV 的样本比例 > 0.3 认为脱落/运动伪迹，返回 0
- * 4. 方差 < 5.0 认为接触不良，返回 50
- * 5. 否则返回 100 - outlier_ratio * 200
+ * 部署滑动窗口 DSP 质检闸门 (Software Quality Gate)
+ * 逻辑：基于 256 帧（1秒相当于256Hz）的信号池，计算时域标准差 (STD)
+ * 1. 如果样本不足 256，返回宽容度得分 50，避免启动瞬间闪退分
+ * 2. 算出去交直流偏置后的时域标准差
+ * 3. STD 若跨越 20µV 红线，严格判定为物理脱落/肌电伪影 (返回 0分)
+ * 4. STD 在 1µV 以下说明导联悬空或短路死寂，判定失效 (返回 0分)
+ * 5. 否则计算健康线性质量分配：越接近红线分数越低。
  */
 export function calculateSignalQuality(samples: number[]): number {
-  if (samples.length < 64) {
+  if (samples.length < 256) {
     return 50;
   }
 
-  // 简单去均值（模拟高通滤波，移除直流偏置）
-  const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
-  const centered = samples.map(v => v - mean);
+  // 截取最近的 256 帧作为 DSP 信号窗口
+  const window = samples.slice(-256);
 
-  // 统计异常值比例（幅值 >= 200µV）
-  let outliers = 0;
-  let sumSq = 0;
+  // 1. 去直流偏置 (计算均值)
+  let sum = 0;
+  for (let i = 0; i < 256; i++) {
+    sum += window[i];
+  }
+  const mean = sum / 256;
 
-  for (const v of centered) {
-    if (Math.abs(v) >= 200.0) {
-      outliers++;
-    }
-    sumSq += v * v;
+  // 2. 计算标准差 (Standard Deviation)
+  let sumSqDiff = 0;
+  for (let i = 0; i < 256; i++) {
+    const diff = window[i] - mean;
+    sumSqDiff += diff * diff;
+  }
+  const variance = sumSqDiff / 256;
+  const stdDev = Math.sqrt(variance);
+
+  // 3. 质检闸门红线判定
+  // 红线：大于 20µV 说明发生了严重的位移、接触不良闪烁或剧烈肌电活动
+  if (stdDev > 20.0) {
+    return 0;
   }
 
-  const outlierRatio = outliers / centered.length;
-  if (outlierRatio > 0.3) {
-    return 0; // 运动伪迹太大，判定为不可用
-  } // 方差太小 = 接触不良
-
-  const variance = sumSq / centered.length;
-  if (variance < 5.0) {
-    return 50; // 接触不良，几乎是平直线
+  // 悬空：低于 1µV 几乎是平直线，通常是不通电的噪点本底
+  if (stdDev < 1.0) {
+    return 0;
   }
 
-  // 根据异常样本比例给出质量分数
-  return Math.max(0, Math.floor(100 - outlierRatio * 200));
+  // 4. 健康转换（1µV - 20µV之间）：
+  // 标准差越小代表越纯净脑波 (最高分)，标准差越大逼近运动基线 (分数下降)
+  // 当 stdDev = 1 的时候最高 100 分，当 stdDev = 20 的时候为 0 分
+  const score = 100 - ((stdDev - 1) / 19) * 100;
+
+  return Math.max(0, Math.min(100, Math.round(score)));
 }

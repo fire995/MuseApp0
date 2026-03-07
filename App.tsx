@@ -24,6 +24,8 @@ if (!global.Buffer) { global.Buffer = Buffer; }
 // 注册前台任务
 ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => { } } });
 
+const ENABLE_PPG_SUBSCRIBE = false; // 按需启停：目前隔离脱离光电波，保护JS桥物理带宽
+
 // ── 常量 ─────────────────────────────────────────────────────────
 const bleManager = new BleManager();
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -933,10 +935,12 @@ export default function App() {
       addLog(`📋 ATHENA_CHANNELS: ${ATHENA_CHANNELS.join(', ')}`);
       addLog(`📋 PPG_CHANNELS: ${PPG_CHANNELS.join(', ')}`);
 
+      // 隔离双模态订阅路由：彻底分离 EEG 脑电波与 fNIRS 光学传感器的通道映射，按需启停
       const allChannels = [...ATHENA_CHANNELS, ...PPG_CHANNELS];
       let subscribedCount = 0;
+      const subscribeChannels = ENABLE_PPG_SUBSCRIBE ? allChannels : ATHENA_CHANNELS;
 
-      for (const uuid of allChannels) {
+      for (const uuid of subscribeChannels) {
         const uuidLower = uuid.toLowerCase();
         const channelId = uuid.substring(4, 8);
 
@@ -946,7 +950,7 @@ export default function App() {
         if (matchedUuid) {
           targetUuid = matchedUuid;
         } else {
-          // EEG 和 PPG 通道强制订阅
+          // EEG（和按需的PPG）强制订阅
           const isEssential = ['0013', '0014', '0015', '0016', '0010', '0011'].includes(channelId);
           if (!isEssential) {
             addLog(`⏭️ 跳过不可用且非必要通道: ${channelId}`);
@@ -956,12 +960,10 @@ export default function App() {
 
         try {
           addLog(`🔍 订阅: ${channelId} (${targetUuid})`);
-          // 每个通道独立的回调计数器
           let cbCount = 0;
           device.monitorCharacteristicForService(MUSE_SERVICE, targetUuid, (error, char) => {
             cbCount++;
 
-            // 节流：只在第1、2、3次和之后每100次打印回调诊断（避免刷屏死机）
             if (cbCount <= 3 || cbCount % 100 === 0) {
               addLog(`📡 [${channelId}] 回调#${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
             }
@@ -972,7 +974,6 @@ export default function App() {
             }
 
             if (char?.value) {
-              // 直接分发到处理管线（日志在 handleMuseDataPacket 内节流输出）
               handleMuseDataPacket(channelId, char.value);
             } else if (cbCount <= 5) {
               addLog(`⚠️ [${channelId}] 空数据包`);
@@ -980,16 +981,14 @@ export default function App() {
           });
           subscribedCount++;
 
-          // 致命修复：在订阅不同通道之间必须强行注入大于 200ms 的沉睡延迟！
-          // Android 底层的 GATT 队列极为脆弱，如果瞬间抛给它 6 个 Notification 订阅，
-          // 它会默默吞掉后 5 个包导致只有 0013 被打开！（这就是你之前所有通道都不见了的根本原因）
+          // 强制沉睡延迟，避免 Android 原生层堆栈爆破吞噬 Subscription 指令
           await sleep(250);
         } catch (e) {
           addLog(`❌ 订阅失败 [${channelId}]: ${e}`);
         }
       }
 
-      addLog(`📡 已订阅 ${subscribedCount}/${allChannels.length} 个通道`);
+      addLog(`📡 已订阅 ${subscribedCount}/${subscribeChannels.length} 个通道`);
 
       // dc001 × 2（必须发两次才能启动数据流）
       await write(device, CMD_START);
