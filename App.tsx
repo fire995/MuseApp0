@@ -22,20 +22,20 @@ import { decodeEEG, analyzeFrequency } from './utils/MuseDecoder';
 if (!global.Buffer) { global.Buffer = Buffer; }
 
 // 注册前台任务
-ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => {} } });
+ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => { } } });
 
 // ── 常量 ─────────────────────────────────────────────────────────
 const bleManager = new BleManager();
-const sleep      = (ms: number) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 // [架构移除] 废弃 WebSocket
 // const WS_URL = 'ws://192.168.0.200:8001/ws/eeg'; 
-const SCREEN_W   = Dimensions.get('window').width - 40;
+const SCREEN_W = Dimensions.get('window').width - 40;
 
-const MUSE_SERVICE    = '0000fe8d-0000-1000-8000-00805f9b34fb';
-const MUSE_CONTROL    = '273e0001-4c4d-454d-96be-f03bac821358';
-const ATHENA_CHANNELS = ['273e0013','273e0014','273e0015','273e0016']
+const MUSE_SERVICE = '0000fe8d-0000-1000-8000-00805f9b34fb';
+const MUSE_CONTROL = '273e0001-4c4d-454d-96be-f03bac821358';
+const ATHENA_CHANNELS = ['273e0013', '273e0014', '273e0015', '273e0016']
   .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
-const PPG_CHANNELS    = ['273e0010','273e0011']
+const PPG_CHANNELS = ['273e0010', '273e0011']
   .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
 
 // ── Muse BLE 命令（Base64）────────────────────────────────────────
@@ -44,15 +44,15 @@ const PPG_CHANNELS    = ['273e0010','273e0011']
 // p21:       \x04p21\n    低功耗模式（EEG 约 50Hz，无 PPG）
 // dc001×2:   \x06dc001\n  启动数据流（必须发两次）
 // status:    \x02s\n      心跳保活
-const CMD_HALT       = 'AmgK';
-const CMD_PRESET_HI  = 'BnAxMDM1Cg==';   // p1035 高速
-const CMD_PRESET_LO  = 'BHAyMQo=';        // p21   低功耗
-const CMD_START      = 'BmRjMDAxCg==';   // dc001
-const CMD_STATUS     = 'AnMK';            // s（心跳）
+const CMD_HALT = 'AmgK';
+const CMD_PRESET_HI = 'BnAxMDM1Cg==';   // p1035 高速
+const CMD_PRESET_LO = 'BHAyMQo=';        // p21   低功耗
+const CMD_START = 'BmRjMDAxCg==';   // dc001
+const CMD_STATUS = 'AnMK';            // s（心跳）
 
 // ── 类型 ─────────────────────────────────────────────────────────
-type SignalLevel    = 'good' | 'ok' | 'poor' | 'none';
-type SamplingMode   = 'dense' | 'sparse';
+type SignalLevel = 'good' | 'ok' | 'poor' | 'none';
+type SamplingMode = 'dense' | 'sparse';
 
 // ── 进度条（隔离组件，避免主树高频重绘）──────────────────────────
 const ProgressBar = () => {
@@ -104,8 +104,8 @@ const ThetaWave = React.memo(({ data }: { data: number[] }) => {
         return (
           <View key={i} style={{
             position: 'absolute',
-            left:  xs[i - 1] + dx / 2 - len / 2,
-            top:   ys[i - 1] + dy / 2 - 1,
+            left: xs[i - 1] + dx / 2 - len / 2,
+            top: ys[i - 1] + dy / 2 - 1,
             width: len, height: 2,
             backgroundColor: '#00B894', borderRadius: 1,
             transform: [{ rotate: `${Math.atan2(dy, dx)}rad` }],
@@ -144,14 +144,14 @@ const DenseSelector = ({ value, onChange }: { value: number; onChange: (v: numbe
 // ── 主组件 ───────────────────────────────────────────────────────
 export default function App() {
   // 连接 & 状态
-  const [battery,       setBattery]       = useState<number | string>('--');
-  const [signalLevel,   setSignalLevel]   = useState<SignalLevel>('none');
-  const [signalScore,   setSignalScore]   = useState(0);
+  const [battery, setBattery] = useState<number | string>('--');
+  const [signalLevel, setSignalLevel] = useState<SignalLevel>('none');
+  const [signalScore, setSignalScore] = useState(0);
   const [electrodeQuality, setElectrodeQuality] = useState<Record<string, number>>({
     TP9: 0, AF7: 0, AF8: 0, TP10: 0
   });
-  const [packetsRx,     setPacketsRx]     = useState(0);
-  const [samplingMode,  setSamplingMode]  = useState<SamplingMode>('dense');
+  const [packetsRx, setPacketsRx] = useState(0);
+  const [samplingMode, setSamplingMode] = useState<SamplingMode>('dense');
   const [savedDeviceId, setSavedDeviceId] = useState<string | null>(null);
 
   // 波形数据
@@ -162,28 +162,28 @@ export default function App() {
   const [musicName, setMusicName] = useState('未加载音乐');
 
   // 保存
-  const [isSaving,  setIsSaving]  = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const isSavingRef = useRef(false);
   useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
-  const [savePath,  setSavePath]  = useState('');
+  const [savePath, setSavePath] = useState('');
   const [denseMins, setDenseMins] = useState(30);
 
   // 日志
   const [logs, setLogs] = useState<string[]>([]);
 
-  const logFileUri      = useRef<string | null>(null);
-  const fileBuffer      = useRef<string>(''); // 内存写缓冲
+  const logFileUri = useRef<string | null>(null);
+  const fileBuffer = useRef<string>(''); // 内存写缓冲
   const sessionStartTime = useRef<number>(Date.now());
   const filePartIndex = useRef<number>(1);
-  const deviceRef       = useRef<Device | null>(null);
-  const isConnecting    = useRef(false);
-  const isAutoRecon     = useRef(false);
-  const userDisconnect  = useRef(false);  // 用户主动断开标志
-  const heartbeat       = useRef<ReturnType<typeof setInterval> | null>(null);
-  const samplingTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deviceRef = useRef<Device | null>(null);
+  const isConnecting = useRef(false);
+  const isAutoRecon = useRef(false);
+  const userDisconnect = useRef(false);  // 用户主动断开标志
+  const heartbeat = useRef<ReturnType<typeof setInterval> | null>(null);
+  const samplingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 信号平滑（10 帧中位数，彻底消除跳变）
-  const signalBuf       = useRef<number[]>([]);
-  
+  const signalBuf = useRef<number[]>([]);
+
   // 导入解码器，已在顶部导入
 
   const addLog = useCallback((msg: string) => {
@@ -207,7 +207,7 @@ export default function App() {
     // 本地文件系统初始化准备，取代 connectWebSocket()
     initLocalFileSystem();
     checkSavedDevice();
-    
+
     const appStateSub = AppState.addEventListener('change', (nextState) => {
       // 避坑：系统切后台/非活跃瞬间，强行清空 JS 堆内存缓冲推入文件系统
       if (nextState === 'background' || nextState === 'inactive') {
@@ -216,7 +216,7 @@ export default function App() {
     });
 
     return () => {
-      if (heartbeat.current)    clearInterval(heartbeat.current);
+      if (heartbeat.current) clearInterval(heartbeat.current);
       if (samplingTimer.current) clearTimeout(samplingTimer.current);
       appStateSub.remove();
     };
@@ -270,7 +270,7 @@ export default function App() {
     filePartIndex.current = 1;
     sessionStartTime.current = Date.now();
     await createNewLogFile();
-    
+
     // 设置默认保存路径
     const defaultFileName = 'muse_data.csv';
     setSavePath(defaultFileName);
@@ -279,14 +279,14 @@ export default function App() {
 
   const flushBufferToFile = async () => {
     if (!logFileUri.current || fileBuffer.current.length === 0) return;
-    
+
     const chunk = fileBuffer.current;
-    fileBuffer.current = ''; 
-    
+    fileBuffer.current = '';
+
     try {
       // @ts-ignore
       const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
-      
+
       if (!fileInfo.exists) {
         // 首写必须禁用 append，并注入 CSV Header
         // @ts-ignore
@@ -321,7 +321,7 @@ export default function App() {
   // 定义一个简单的 4-8Hz 带通近似逻辑（或直接显示滤波后的原始波形）
   const processThetaWave = (rawSamples: number[]) => {
     if (rawSamples.length === 0) return;
-    
+
     // 使用所有样本点，而不是只取第一个
     setThetaWave(prev => {
       const newData = [...prev, ...rawSamples];
@@ -333,15 +333,15 @@ export default function App() {
   const analyzeDrowsiness = async (thetaEnergy: number, alphaEnergy: number) => {
     // 极简困意启发式算法：Theta 波增加，Alpha 波减弱，标志进入浅睡 (N1期)
     // 此处根据实际算出的能量幅值调整阈值
-    const drowsinessScore = (thetaEnergy / (alphaEnergy + 1)) * 100; 
-    
+    const drowsinessScore = (thetaEnergy / (alphaEnergy + 1)) * 100;
+
     // 满足困意条件且正在播放音乐
     if (drowsinessScore > 75 && isPlaying) {
       const vol = await TrackPlayer.getVolume();
       if (vol > 0.1) {
         // 每次平滑降低 5% 音量
         await TrackPlayer.setVolume(Math.max(0.1, vol - 0.05));
-        addLog(`💤 检测到入睡脑波，音量已自动调低至 ${Math.floor((vol - 0.05)*100)}%`);
+        addLog(`💤 检测到入睡脑波，音量已自动调低至 ${Math.floor((vol - 0.05) * 100)}%`);
       }
     }
   };
@@ -349,12 +349,12 @@ export default function App() {
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
     // 🔴 诊断日志：确认数据到达
     addLog(`📦 [${channel}] 收到数据包 (${base64Data.length}字节)`);
-    
+
     // 1. 保存原始数据（仅在采集时）
     if (isSavingRef.current && logFileUri.current) {
       const timestamp = new Date().toISOString();
       fileBuffer.current += `${timestamp},${channel},${base64Data}\n`;
-      
+
       if (fileBuffer.current.length > 10240) {
         flushBufferToFile();
       }
@@ -366,13 +366,13 @@ export default function App() {
       try {
         const samples = decodeEEG(base64Data);
         addLog(`✅ [${channel}] 解码成功: ${samples.length}个样本`);
-        
+
         if (samples.length > 0) {
           processThetaWave(samples);
           // 频域分析
           const { theta, alpha } = analyzeFrequency(samples);
           analyzeDrowsiness(theta, alpha);
-          
+
           setPacketsRx(prev => {
             const newCount = prev + 1;
             if (newCount % 10 === 0) {
@@ -395,7 +395,7 @@ export default function App() {
         android: { appKilledPlaybackBehavior: AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification },
         capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
       });
-    } catch {}
+    } catch { }
   };
 
   const pickAndPlay = async () => {
@@ -416,31 +416,59 @@ export default function App() {
   const togglePlay = async () => {
     try {
       if (isPlaying) { await TrackPlayer.pause(); setIsPlaying(false); }
-      else           { await TrackPlayer.play();  setIsPlaying(true); }
-    } catch {}
+      else { await TrackPlayer.play(); setIsPlaying(true); }
+    } catch { }
   };
 
   // ── 保存控制 ─────────────────────────────────────────────────
-  const toggleSave = () => {
-    // 切换保存状态
-    setIsSaving(!isSaving);
+  const toggleSave = async () => {
     if (!isSaving) {
+      // 开始保存
+      setIsSaving(true);
       addLog(`💾 开始保存数据`);
-      // 创建新的日志文件
-      const fileName = `MuseData_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-      // @ts-ignore
-      logFileUri.current = `${FileSystem.documentDirectory}${'muse_data.csv'}`;
-      setSavePath('muse_data.csv');
-      addLog(`📁 加载保存路径: muse_data.csv`);
-      
+
+      // 创建带时间戳的数据文件并写入 CSV 头
+      try {
+        const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+        const fileName = `muse_data_${timeStr}.csv`;
+        // @ts-ignore
+        const uri = `${FileSystem.documentDirectory}${fileName}`;
+        // @ts-ignore
+        await FileSystem.writeAsStringAsync(uri, 'timestamp,channel,data\n', { encoding: FileSystem.EncodingType.UTF8 });
+        logFileUri.current = uri;
+        fileBuffer.current = ''; // 清空缓冲区，避免残留旧数据
+        setSavePath(fileName);
+        addLog(`📁 数据文件已创建: ${fileName}`);
+      } catch (e) {
+        addLog(`🔴 创建数据文件失败: ${e}`);
+        setIsSaving(false);
+        return;
+      }
+
       // 启动前台服务和CPU唤醒锁
       startForegroundCapture();
     } else {
+      // 停止保存
+      setIsSaving(false);
       addLog(`⏹ 停止保存`);
       // 确保最后的缓冲区内容被写入
-      flushBufferToFile();
+      await flushBufferToFile();
+
+      // 打印保存统计
+      if (logFileUri.current) {
+        try {
+          // @ts-ignore
+          const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
+          // @ts-ignore
+          if (fileInfo.exists && fileInfo.size) {
+            // @ts-ignore
+            const sizeKB = (fileInfo.size / 1024).toFixed(1);
+            addLog(`📊 数据文件大小: ${sizeKB} KB`);
+          }
+        } catch { }
+      }
       logFileUri.current = null;
-      
+
       // 停止前台服务和CPU唤醒锁
       stopForegroundCapture();
     }
@@ -459,7 +487,7 @@ export default function App() {
         color: '#000000',
         visibility: 'public',
       });
-      
+
       // 2. 注入 Partial Wake Lock 锁死 CPU 运行态
       await activateKeepAwakeAsync('muse-ble-lock');
     }
@@ -501,18 +529,21 @@ export default function App() {
     try {
       // 先刷新缓冲区
       await flushBufferToFile();
-      
+
       // @ts-ignore
       const documentDir = FileSystem.documentDirectory;
       if (!documentDir) {
         addLog('🔴 无法访问文档目录');
         return;
       }
-      
+
       // @ts-ignore
       const files = await FileSystem.readDirectoryAsync(documentDir);
-      const dataFiles = files.filter(f => f.startsWith('muse_log_') && f.endsWith('.csv'));
-      
+      // 匹配所有数据文件：muse_log_*.csv 和 muse_data_*.csv
+      const dataFiles = files.filter(f =>
+        (f.startsWith('muse_log_') || f.startsWith('muse_data_')) && f.endsWith('.csv')
+      );
+
       if (dataFiles.length === 0) {
         addLog('⚠️ 没有可导出的数据文件');
         return;
@@ -520,16 +551,19 @@ export default function App() {
 
       addLog(`📦 找到 ${dataFiles.length} 个数据文件`);
 
-      // 简化：直接导出第一个文件（最新的）
+      // 导出最新的文件（按文件名排序，文件名含时间戳）
       const latestFile = dataFiles.sort().reverse()[0];
       const fileUri = `${documentDir}${latestFile}`;
-      
+
       // @ts-ignore
       const fileInfo = await FileSystem.getInfoAsync(fileUri);
       // @ts-ignore
       if (fileInfo.exists) {
+        // @ts-ignore
+        const sizeKB = fileInfo.size ? (fileInfo.size / 1024).toFixed(1) : '未知';
+        addLog(`📤 导出文件: ${latestFile} (${sizeKB} KB)`);
         await Sharing.shareAsync(fileUri);
-        addLog(`📤 已导出: ${latestFile}`);
+        addLog(`✅ 导出完成: ${latestFile}`);
       } else {
         addLog('⚠️ 文件不存在');
       }
@@ -629,22 +663,22 @@ export default function App() {
           ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
         }
 
-        // 解析佩戴质量 (Horseshoe) - 支持多种格式
-        let hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
-        if (!hsMatch) {
-          // 尝试无空格版本
-          hsMatch = ctrlBuf.match(/"hs":\[(\d+),(\d+),(\d+),(\d+)\]/);
-        }
+        // 解析佩戴质量 (Horseshoe) - 支持整数和浮点数格式
+        // Muse 可能发送 "hs":[1,2,1,4] 或 "hs":[1.0, 2.0, 1.0, 4.0]
+        let hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\]/);
         if (hsMatch) {
           const [tp9, af7, af8, tp10] = hsMatch.slice(1).map(v => {
-            const vInt = parseInt(v);
+            const vFloat = parseFloat(v);
+            const vInt = Math.round(vFloat);
+            // Muse horseshoe 值: 1=良好, 2=一般, 3+=差
             return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
           });
           setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
           const avg = (tp9 + af7 + af8 + tp10) / 4;
           updateSignal(avg);
+          addLog(`👤 佩戴质量 - TP9:${tp9}% AF7:${af7}% AF8:${af8}% TP10:${tp10}%`);
           // 彻底清除处理过的数据段
-          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[[\d\s,]+\]/, '');
+          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[[\d.\s,]+\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
@@ -663,7 +697,7 @@ export default function App() {
           addLog(`🔧 ${label}`);
         });
 
-      await sendCmd(CMD_HALT,      'halt');
+      await sendCmd(CMD_HALT, 'halt');
       await sendCmd(CMD_PRESET_HI, 'preset p1035 高速模式');
       setSamplingMode('dense');
 
@@ -690,16 +724,16 @@ export default function App() {
       addLog('🛡️ 订阅 EEG + PPG 通道…');
       addLog(`📋 ATHENA_CHANNELS: ${ATHENA_CHANNELS.join(', ')}`);
       addLog(`📋 PPG_CHANNELS: ${PPG_CHANNELS.join(', ')}`);
-      
+
       const allChannels = [...ATHENA_CHANNELS, ...PPG_CHANNELS];
       let subscribedCount = 0;
 
       for (const uuid of allChannels) {
         const uuidLower = uuid.toLowerCase();
         const channelId = uuid.substring(4, 8);
-        
+
         addLog(`🔍 尝试订阅通道: ${channelId} (UUID: ${uuid})`);
-        
+
         // 如果有可用 UUID 列表，检查该通道是否存在
         if (availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
           addLog(`⏭️ 跳过不可用通道: ${channelId}`);
@@ -710,12 +744,12 @@ export default function App() {
           device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
             // 🔴 诊断日志：打印回调触发情况
             addLog(`🔴 [${channelId}] 回调触发 - error: ${error ? 'YES' : 'NO'}, char: ${char ? 'YES' : 'NO'}`);
-            
+
             if (error) {
               addLog(`⚠️ 通道订阅异常 [${channelId}]: ${error.message}`);
               return;
             }
-            
+
             if (char?.value) {
               // 🔴 诊断日志：打印原始 Base64 数据
               addLog(`📊 [${channelId}] 原始数据: ${char.value.substring(0, 50)}... (长度=${char.value.length})`);
@@ -833,42 +867,42 @@ export default function App() {
   const clearPairedDevice = async () => {
     // 1. 先设置用户主动断开标志，阻止 onDisconnected 回调触发重连
     userDisconnect.current = true;
-    
+
     // 2. 停止所有定时器
     if (samplingTimer.current) { clearTimeout(samplingTimer.current); samplingTimer.current = null; }
-    if (heartbeat.current)     { clearInterval(heartbeat.current);    heartbeat.current = null; }
-    
+    if (heartbeat.current) { clearInterval(heartbeat.current); heartbeat.current = null; }
+
     // 3. 取消自动重连
     isAutoRecon.current = false;
-    
+
     // 4. 断开 BLE 连接
     try {
       if (deviceRef.current) {
         await deviceRef.current.cancelConnection();
         addLog('🔌 已断开头环 BLE 连接');
       }
-    } catch {}
-    
+    } catch { }
+
     // 5. 清理状态
     deviceRef.current = null;
     await AsyncStorage.removeItem('MUSE_DEVICE_ID');
     setSavedDeviceId(null);
     setSamplingMode('dense');
-    
+
     // 6. 延迟重置标志，确保 onDisconnected 回调已完成
     setTimeout(() => {
       userDisconnect.current = false;
     }, 1000);
-    
+
     addLog('🗑️ 配对已清除，头环已进入配对模式');
   };
 
   // ── 信号样式 ─────────────────────────────────────────────────
   const SIG = {
-    good: { color: '#00E676', label: '信号良好 ✓',         desc: '采集质量优秀，数据可用于分析' },
-    ok:   { color: '#FFCA28', label: '信号一般 — 调整头环', desc: '数据基本可用，建议调整佩戴' },
-    poor: { color: '#FF5252', label: '信号差 — 重新佩戴',   desc: '建议取下重新佩戴后再试' },
-    none: { color: '#555',    label: '未连接 / 等待数据',   desc: '' },
+    good: { color: '#00E676', label: '信号良好 ✓', desc: '采集质量优秀，数据可用于分析' },
+    ok: { color: '#FFCA28', label: '信号一般 — 调整头环', desc: '数据基本可用，建议调整佩戴' },
+    poor: { color: '#FF5252', label: '信号差 — 重新佩戴', desc: '建议取下重新佩戴后再试' },
+    none: { color: '#555', label: '未连接 / 等待数据', desc: '' },
   }[signalLevel];
 
   // ── 渲染 ─────────────────────────────────────────────────────
@@ -937,7 +971,7 @@ export default function App() {
           <Text style={s.cardTitle}>〜 Theta 脑波（4–8 Hz）</Text>
           {/* 采样模式小标签 */}
           <View style={[s.modePill,
-            samplingMode === 'dense' ? s.modePillDense : s.modePillSparse]}>
+          samplingMode === 'dense' ? s.modePillDense : s.modePillSparse]}>
             <Text style={s.modePillText}>
               {samplingMode === 'dense' ? '⚡ 高速' : '🌙 低功耗'}
             </Text>
@@ -972,7 +1006,7 @@ export default function App() {
 
         {isSaving && (
           <View style={[s.modeBadge,
-            samplingMode === 'dense' ? s.modeBadgeDense : s.modeBadgeSparse]}>
+          samplingMode === 'dense' ? s.modeBadgeDense : s.modeBadgeSparse]}>
             <Text style={s.modeBadgeText}>
               {samplingMode === 'dense'
                 ? `⚡ 高速采集中 · 头环 p1035（256Hz）`
@@ -990,7 +1024,7 @@ export default function App() {
         {isSaving && savePath ? (
           <Text style={s.savePath}>📂 {savePath}</Text>
         ) : null}
-        
+
         {!isSaving && savePath ? (
           <TouchableOpacity
             style={s.exportBtn}
@@ -1012,74 +1046,90 @@ export default function App() {
 
 // ── 样式 ─────────────────────────────────────────────────────────
 const s = StyleSheet.create({
-  root:           { flex: 1, backgroundColor: '#0D0F14' },
-  header:         { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-                    paddingHorizontal: 20, paddingTop: 54, paddingBottom: 12 },
-  title:          { fontSize: 22, fontWeight: '700', color: '#EAEAEA' },
-  batteryWrap:    { alignItems: 'center', gap: 3 },
-  batteryText:    { color: '#aaa', fontSize: 12 },
-  batteryBar:     { height: 3, backgroundColor: '#00E676', borderRadius: 2 },
+  root: { flex: 1, backgroundColor: '#0D0F14' },
+  header: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingTop: 54, paddingBottom: 12
+  },
+  title: { fontSize: 22, fontWeight: '700', color: '#EAEAEA' },
+  batteryWrap: { alignItems: 'center', gap: 3 },
+  batteryText: { color: '#aaa', fontSize: 12 },
+  batteryBar: { height: 3, backgroundColor: '#00E676', borderRadius: 2 },
 
-  sigCard:        { flexDirection: 'row', alignItems: 'center', marginHorizontal: 20,
-                    marginBottom: 14, borderWidth: 1.5, borderRadius: 12,
-                    paddingVertical: 10, paddingHorizontal: 14, gap: 10 },
-  sigDot:         { width: 10, height: 10, borderRadius: 5 },
-  horseshoe:      { flexDirection: 'row', gap: 3 },
-  hsDot:          { width: 6, height: 6, borderRadius: 3 },
-  sigLabel:       { fontSize: 13, fontWeight: '700' },
-  sigDesc:        { fontSize: 11, color: '#666', marginTop: 2 },
-  sigScore:       { fontSize: 18, fontWeight: '800' },
-  pktBadge:       { fontSize: 10, color: '#555', backgroundColor: '#1A1D27',
-                    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 10 },
+  sigCard: {
+    flexDirection: 'row', alignItems: 'center', marginHorizontal: 20,
+    marginBottom: 14, borderWidth: 1.5, borderRadius: 12,
+    paddingVertical: 10, paddingHorizontal: 14, gap: 10
+  },
+  sigDot: { width: 10, height: 10, borderRadius: 5 },
+  horseshoe: { flexDirection: 'row', gap: 3 },
+  hsDot: { width: 6, height: 6, borderRadius: 3 },
+  sigLabel: { fontSize: 13, fontWeight: '700' },
+  sigDesc: { fontSize: 11, color: '#666', marginTop: 2 },
+  sigScore: { fontSize: 18, fontWeight: '800' },
+  pktBadge: {
+    fontSize: 10, color: '#555', backgroundColor: '#1A1D27',
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 10
+  },
 
-  card:           { marginHorizontal: 20, marginBottom: 14, backgroundColor: '#1A1D27',
-                    borderRadius: 16, padding: 16 },
-  cardTitle:      { fontSize: 14, color: '#EAEAEA', fontWeight: '700', marginBottom: 4 },
-  cardSub:        { fontSize: 11, color: '#555', marginBottom: 10 },
+  card: {
+    marginHorizontal: 20, marginBottom: 14, backgroundColor: '#1A1D27',
+    borderRadius: 16, padding: 16
+  },
+  cardTitle: { fontSize: 14, color: '#EAEAEA', fontWeight: '700', marginBottom: 4 },
+  cardSub: { fontSize: 11, color: '#555', marginBottom: 10 },
 
-  waveBox:        { backgroundColor: '#0D0F14', borderRadius: 8, overflow: 'hidden' },
+  waveBox: { backgroundColor: '#0D0F14', borderRadius: 8, overflow: 'hidden' },
 
-  modePill:       { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
-  modePillDense:  { backgroundColor: '#1a3a4a' },
+  modePill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
+  modePillDense: { backgroundColor: '#1a3a4a' },
   modePillSparse: { backgroundColor: '#1a2e1a' },
-  modePillText:   { fontSize: 10, color: '#aaa', fontWeight: '600' },
+  modePillText: { fontSize: 10, color: '#aaa', fontWeight: '600' },
 
-  musicName:      { fontSize: 13, color: '#aaa', textAlign: 'center', marginBottom: 14 },
-  btnRow:         { flexDirection: 'row', justifyContent: 'center', gap: 12 },
-  btnPurple:      { backgroundColor: '#8E44AD', paddingVertical: 11, paddingHorizontal: 22, borderRadius: 10 },
-  btnBlue:        { backgroundColor: '#3498DB', paddingVertical: 11, paddingHorizontal: 22, borderRadius: 10 },
-  btnRed:         { backgroundColor: '#E74C3C' },
-  btnText:        { color: '#fff', fontWeight: '700', fontSize: 14 },
-  timeText:       { color: '#888', fontSize: 11, width: 34 },
-  barTrack:       { flex: 1, height: 4, backgroundColor: '#2A2D3A', borderRadius: 2, overflow: 'hidden' },
-  barFill:        { height: '100%', borderRadius: 2 },
+  musicName: { fontSize: 13, color: '#aaa', textAlign: 'center', marginBottom: 14 },
+  btnRow: { flexDirection: 'row', justifyContent: 'center', gap: 12 },
+  btnPurple: { backgroundColor: '#8E44AD', paddingVertical: 11, paddingHorizontal: 22, borderRadius: 10 },
+  btnBlue: { backgroundColor: '#3498DB', paddingVertical: 11, paddingHorizontal: 22, borderRadius: 10 },
+  btnRed: { backgroundColor: '#E74C3C' },
+  btnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  timeText: { color: '#888', fontSize: 11, width: 34 },
+  barTrack: { flex: 1, height: 4, backgroundColor: '#2A2D3A', borderRadius: 2, overflow: 'hidden' },
+  barFill: { height: '100%', borderRadius: 2 },
 
-  actionBtn:      { backgroundColor: '#4A90E2', padding: 14, borderRadius: 12,
-                    alignItems: 'center', marginBottom: 10 },
-  clearBtn:       { alignItems: 'center', paddingVertical: 8 },
-  clearText:      { color: '#FF6B6B', fontSize: 12 },
+  actionBtn: {
+    backgroundColor: '#4A90E2', padding: 14, borderRadius: 12,
+    alignItems: 'center', marginBottom: 10
+  },
+  clearBtn: { alignItems: 'center', paddingVertical: 8 },
+  clearText: { color: '#FF6B6B', fontSize: 12 },
 
-  sliderLabel:    { fontSize: 12, color: '#aaa' },
-  sliderHint:     { fontSize: 11, color: '#555', lineHeight: 17, marginBottom: 10, marginTop: 3 },
-  optRow:         { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
-  optBtn:         { paddingHorizontal: 13, paddingVertical: 6, borderRadius: 20,
-                    backgroundColor: '#2A2D3A', borderWidth: 1, borderColor: '#444' },
-  optBtnOn:       { backgroundColor: '#3498DB', borderColor: '#3498DB' },
-  optText:        { color: '#aaa', fontSize: 12, fontWeight: '600' },
+  sliderLabel: { fontSize: 12, color: '#aaa' },
+  sliderHint: { fontSize: 11, color: '#555', lineHeight: 17, marginBottom: 10, marginTop: 3 },
+  optRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
+  optBtn: {
+    paddingHorizontal: 13, paddingVertical: 6, borderRadius: 20,
+    backgroundColor: '#2A2D3A', borderWidth: 1, borderColor: '#444'
+  },
+  optBtnOn: { backgroundColor: '#3498DB', borderColor: '#3498DB' },
+  optText: { color: '#aaa', fontSize: 12, fontWeight: '600' },
 
-  modeBadge:      { padding: 10, borderRadius: 8, marginBottom: 10 },
+  modeBadge: { padding: 10, borderRadius: 8, marginBottom: 10 },
   modeBadgeDense: { backgroundColor: '#0d1f2d' },
-  modeBadgeSparse:{ backgroundColor: '#0d1f0d' },
-  modeBadgeText:  { color: '#aaa', fontSize: 12 },
+  modeBadgeSparse: { backgroundColor: '#0d1f0d' },
+  modeBadgeText: { color: '#aaa', fontSize: 12 },
 
-  saveBtn:        { backgroundColor: '#2A7DB5', paddingVertical: 12, borderRadius: 10,
-                    alignItems: 'center', marginBottom: 8 },
-  saveBtnOn:      { backgroundColor: '#E74C3C' },
-  exportBtn:      { backgroundColor: '#5D408B', paddingVertical: 12, borderRadius: 10,
-                    alignItems: 'center', marginTop: 8 },
-  savePath:       { fontSize: 11, color: '#555', textAlign: 'center' },
+  saveBtn: {
+    backgroundColor: '#2A7DB5', paddingVertical: 12, borderRadius: 10,
+    alignItems: 'center', marginBottom: 8
+  },
+  saveBtnOn: { backgroundColor: '#E74C3C' },
+  exportBtn: {
+    backgroundColor: '#5D408B', paddingVertical: 12, borderRadius: 10,
+    alignItems: 'center', marginTop: 8
+  },
+  savePath: { fontSize: 11, color: '#555', textAlign: 'center' },
 
-  logBox:         { margin: 20, backgroundColor: '#0A0C11', borderRadius: 12, padding: 14 },
-  logHeader:      { color: '#444', fontSize: 11, textAlign: 'center', marginBottom: 8 },
-  logLine:        { fontSize: 11, color: '#00FF88', marginBottom: 4, fontFamily: 'monospace' },
+  logBox: { margin: 20, backgroundColor: '#0A0C11', borderRadius: 12, padding: 14 },
+  logHeader: { color: '#444', fontSize: 11, textAlign: 'center', marginBottom: 8 },
+  logLine: { fontSize: 11, color: '#00FF88', marginBottom: 4, fontFamily: 'monospace' },
 });
