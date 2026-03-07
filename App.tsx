@@ -896,58 +896,55 @@ export default function App() {
         addLog(`⚠️ 服务枚举失败: ${e}，尝试直接订阅…`);
       }
 
-      // ── 全新的通道订阅方案：直接遍历设备报告的原生特征值 UUID ──
-      // 不再使用硬编码的UUID，而是直接用服务发现返回的 Characteristic 对象
-      const EEG_IDS = ['0013', '0014', '0015', '0016'];
-      const PPG_IDS = ['0010', '0011'];
-      const WANTED_IDS = ENABLE_PPG_SUBSCRIBE ? [...EEG_IDS, ...PPG_IDS] : EEG_IDS;
+      // ── 无条件全量订阅方案 ──
+      // 用户要求：所有通道所有数据都保存到一个文件，不区分。
       let subscribedCount = 0;
 
-      // 方案A：优先使用设备发现的原生 UUID
+      // 方案A：优先使用设备发现的原生 UUID（只要它不是 Control 通道就行）
       if (availableUUIDs.length > 0) {
-        addLog(`📚 从设备发现的 ${availableUUIDs.length} 个特征值中订阅...`);
+        addLog(`📚 从设备发现 ${availableUUIDs.length} 个特征值，开始【全量暴力】订阅...`);
         for (const nativeUuid of availableUUIDs) {
-          // 提取第5~8个字符作为通道ID
+          // 跳过已经单独订阅的控制通道
+          if (nativeUuid.toLowerCase() === MUSE_CONTROL.toLowerCase()) continue;
+
           const chId = nativeUuid.substring(4, 8).toLowerCase();
-          if (!WANTED_IDS.includes(chId)) continue;
 
           try {
             addLog(`🔍 订阅[${chId}] UUID=${nativeUuid}`);
             let cbCount = 0;
+            // Native UUID 结尾会有区别，利用原生给的 UUID 去订阅
             device.monitorCharacteristicForService(MUSE_SERVICE, nativeUuid, (error, char) => {
               cbCount++;
-              if (cbCount <= 3 || cbCount % 200 === 0) {
+              if (cbCount <= 3 || cbCount % 500 === 0) {
                 addLog(`📡 [${chId}] #${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
               }
-              if (error) { addLog(`⚠️ [${chId}]: ${error.message}`); return; }
+              if (error) { return; } // 取消报错刷屏
               if (char?.value) handleMuseDataPacket(chId, char.value);
-            });
+            }, nativeUuid); // 强烈注意：把 UUID 传给 transactionId，防止内部互相覆盖！
             subscribedCount++;
-            await sleep(800);
+            await sleep(800); // 必须保留长延时，防止底层GATT风暴吃包
           } catch (e) {
             addLog(`❌ 订阅失败 [${chId}]: ${e}`);
           }
         }
       } else {
-        // 方案B：备用-用硬编码UUID
-        addLog(`⚠️ 未发现服务特征，使用硬编码UUID订阅...`);
-        for (const uuid of ATHENA_CHANNELS) {
-          const chId = uuid.substring(4, 8);
+        // 方案B：备用-硬编码所有可能通道的暴力订阅 0002 ~ 001B
+        addLog(`⚠️ 未发现特征列表，开启【暴力盲踩】订阅...`);
+        const possibleIds = ['0013', '0014', '0015', '0016', '0010', '0011', '000e', '000f'];
+        for (const pid of possibleIds) {
+          const uuid = `273e${pid}-4c4d-454d-96be-f03bac821358`;
           try {
-            addLog(`🔍 订阅[${chId}] UUID=${uuid}`);
+            addLog(`🔍 订阅[${pid}]`);
             let cbCount = 0;
             device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
               cbCount++;
-              if (cbCount <= 3 || cbCount % 200 === 0) {
-                addLog(`📡 [${chId}] #${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
-              }
-              if (error) { addLog(`⚠️ [${chId}]: ${error.message}`); return; }
-              if (char?.value) handleMuseDataPacket(chId, char.value);
-            });
+              if (error) { return; }
+              if (char?.value) handleMuseDataPacket(pid, char.value);
+            }, uuid);
             subscribedCount++;
             await sleep(800);
           } catch (e) {
-            addLog(`❌ 订阅失败 [${chId}]: ${e}`);
+            addLog(`❌ 订阅失败 [${pid}]`);
           }
         }
       }
