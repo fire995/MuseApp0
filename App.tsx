@@ -190,9 +190,10 @@ export default function App() {
   const dataFlowActive = useRef<boolean>(false);    // 数据流是否已激活
   const packetCountRef = useRef<number>(0);         // 总数据包计数（不触发UI）
   const saveRowCount = useRef<number>(0);           // 保存的行数
-  const horseshoeScore = useRef<number>(50);         // 兼容保留(不再作为主逻辑)
-  // 硬件原生状态: 1=Good, 2=OK, 4=Bad (默认4=未佩戴)
-  const hardwareRawRef = useRef<Record<string, number>>({ TP9: 4, AF7: 4, AF8: 4, TP10: 4 });
+  const horseshoeScore = useRef<number>(50);         // 兼容保留
+  // 硬件原生状态: 1=Good, 2=OK, 4=Bad (默认-1=未收到过)
+  const hardwareRawRef = useRef<Record<string, number>>({ TP9: -1, AF7: -1, AF8: -1, TP10: -1 });
+  const hardwareEverReceived = useRef<boolean>(false); // 是否曾经收到过硬件状态包
   // 软件质量分析分 (0-100)
   const softwareRawRef = useRef<Record<string, number>>({ TP9: 0, AF7: 0, AF8: 0, TP10: 0 });
   const diagnosticTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -213,26 +214,36 @@ export default function App() {
 
   // ── 信号总分算法 (总分100 = 硬件60分 + 波形40分) ────────────────────
   const recalcTotalSignal = useCallback(() => {
-    let hwScore = 0;
     const newUIQuality: Record<string, number> = {};
 
-    ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
-      const hwValue = hardwareRawRef.current[ch] || 4; // 默认为4(差)
-      if (hwValue === 1) {
-        hwScore += 15;
-        newUIQuality[ch] = 100; // UI绿灯
-      } else if (hwValue === 2) {
-        hwScore += 10;
-        newUIQuality[ch] = 50;  // UI黄灯
-      } else {
-        hwScore += 0;
-        newUIQuality[ch] = 0;   // UI红灯
-      }
-    });
+    // 硬件分计算（仅在收到过硌件包时才用）
+    let hwScore = 0;
+    if (hardwareEverReceived.current) {
+      ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
+        const hwValue = hardwareRawRef.current[ch];
+        if (hwValue === 1) {
+          hwScore += 15;
+          newUIQuality[ch] = 100; // UI绿灯
+        } else if (hwValue === 2) {
+          hwScore += 10;
+          newUIQuality[ch] = 50;  // UI黄灯
+        } else {
+          hwScore += 0;
+          newUIQuality[ch] = 0;   // UI红灯
+        }
+      });
+    } else {
+      // 还没收到过硬件数据时，硬件分按中等给分，不强制为0
+      hwScore = 30; // 给一个中等分，避免叡死在0
+      ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
+        newUIQuality[ch] = 50; // 黄灯表示等待硬件状态
+      });
+    }
 
+    // 软件分计算（波形分析） —— 占 40 分
     const softValues = Object.values(softwareRawRef.current);
     const avgSoft = softValues.reduce((a, b) => a + b, 0) / 4;
-    const swScore = avgSoft * 0.4; // 软件占比 40%
+    const swScore = avgSoft * 0.4;
 
     // 更新各通道圆圈灯光颜色
     setElectrodeQuality(newUIQuality);
@@ -240,17 +251,17 @@ export default function App() {
     // 计算总分
     let finalScore = Math.round(hwScore + swScore);
 
-    // 若在这5秒内根本没收到数据，强行降为 0 分
+    // 若在5秒内根本没收到数据，强行降为 0 分
     const now = Date.now();
     const timeSinceData = now - lastDataTime.current;
     if (lastDataTime.current === 0 || timeSinceData > 5000) {
-      finalScore = 0; // 无有效数据流
+      finalScore = 0;
     }
 
-    // 信号分平滑处理机制（避免分数值频繁乱跳）
+    // 信号分平滑处理机制
     const buf = signalBuf.current;
     buf.push(finalScore);
-    if (buf.length > 5) buf.shift(); // 存最近5次
+    if (buf.length > 5) buf.shift();
     const sorted = [...buf].sort((a, b) => a - b);
     const mid = sorted[Math.floor(sorted.length / 2)];
 
@@ -829,17 +840,14 @@ export default function App() {
 
         addLog(`📡 Control 通道收到数据: ${char.value.substring(0, 50)}...`);
         const txt = Buffer.from(char.value, 'base64').toString();
-        addLog(`📝 解码后: ${txt.substring(0, 100)}`);
+        addLog(`📡 Control raw: ${txt.substring(0, 120)}`);
         ctrlBuf += txt;
 
-        // 【分包容错】检查特定 JSON 数组是否被截断
-        // 由于蓝牙 MTU 限制长 JSON 会被切片发送，遇到没有完全闭合的 `]` 需要先缓冲
-        const isArrayPending =
-          (ctrlBuf.includes('"hs":[') || ctrlBuf.includes('"ch":[') || ctrlBuf.includes('"hn":['))
-          && !ctrlBuf.includes(']');
-
-        if (isArrayPending) {
-          addLog(`⏳ ControlJSON片段拼接中...等待闭合`);
+        // 【分包容错】检查 hn/hs/ch 数组是否已完整闭合
+        // 先检测是否包含了键名开头但尚未关闭
+        const hasOpenArray = /"(?:hs|ch|hn)"\s*:\s*\[[^\]]*$/.test(ctrlBuf);
+        if (hasOpenArray) {
+          addLog(`⏳ 硬件状态JSON片段拼接中...等待闭合`);
           return; // 暂不解析，等待下个包
         }
 
@@ -872,10 +880,11 @@ export default function App() {
               AF8: Math.round(values[2] || 4),
               TP10: Math.round(values[3] || 4)
             };
+            hardwareEverReceived.current = true;
 
             recalcTotalSignal();
 
-            addLog(`👤 硬件原始值更新 - TP9:${hardwareRawRef.current.TP9} AF7:${hardwareRawRef.current.AF7} AF8:${hardwareRawRef.current.AF8} TP10:${hardwareRawRef.current.TP10}`);
+            addLog(`👤 硬件状态更新 TP9:${hardwareRawRef.current.TP9} AF7:${hardwareRawRef.current.AF7} AF8:${hardwareRawRef.current.AF8} TP10:${hardwareRawRef.current.TP10}`);
           }
           ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[\d.\s,]+\]/, '');
         }
@@ -933,10 +942,9 @@ export default function App() {
 
         addLog(`🔍 尝试订阅通道: ${channelId} (UUID: ${uuid})`);
 
-        // 如果有可用 UUID 列表，检查该通道是否存在
-        // 注意：Muse S 的 UUID 大小写可能不一致，强制订阅所有 EEG 通道
-        const isEEG = ['0013', '0014', '0015', '0016'].includes(channelId);
-        if (!isEEG && availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
+        // EEG 和 PPG 通道强制订阅，不受 UUID 大小写影响
+        const isEssential = ['0013', '0014', '0015', '0016', '0010', '0011'].includes(channelId);
+        if (!isEssential && availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
           addLog(`⏭️ 跳过不可用通道: ${channelId}`);
           continue;
         }
