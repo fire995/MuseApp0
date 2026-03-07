@@ -196,6 +196,7 @@ export default function App() {
     '0013': [], '0014': [], '0015': [], '0016': []
   });
   const lastSaveTime = useRef<number>(0);            // 上次写入TXT的时间，用于0.5秒节流
+  const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null); // 防闪退定时刷盘
 
   // 导入解码器，已在顶部导入
 
@@ -603,10 +604,21 @@ export default function App() {
 
       // 启动前台服务和CPU唤醒锁
       startForegroundCapture();
+
+      // 每 2 分钟强制刷盘一次，防止应用闪退导致数据丢失
+      if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = setInterval(() => {
+        addLog(`⏳ [定时] 2分钟自动防闪退保存...`);
+        flushBufferToFile();
+      }, 120000);
     } else {
       // 停止保存
       setIsSaving(false);
       addLog(`⏹ 停止保存`);
+      if (autoSaveTimerRef.current) {
+        clearInterval(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
       // 确保最后的缓冲区内容被写入
       await flushBufferToFile();
 
@@ -810,6 +822,17 @@ export default function App() {
         const txt = Buffer.from(char.value, 'base64').toString();
         addLog(`📝 解码后: ${txt.substring(0, 100)}`);
         ctrlBuf += txt;
+
+        // 【分包容错】检查特定 JSON 数组是否被截断
+        // 由于蓝牙 MTU 限制长 JSON 会被切片发送，遇到没有完全闭合的 `]` 需要先缓冲
+        const isArrayPending =
+          (ctrlBuf.includes('"hs":[') || ctrlBuf.includes('"ch":[') || ctrlBuf.includes('"hn":['))
+          && !ctrlBuf.includes(']');
+
+        if (isArrayPending) {
+          addLog(`⏳ ControlJSON片段拼接中...等待闭合`);
+          return; // 暂不解析，等待下个包
+        }
 
         // 解析电池 (兼容整数和浮点数如 "bp":89.23)
         const bpMatch = ctrlBuf.match(/"bp"\s*:\s*([\d.]+)/);
