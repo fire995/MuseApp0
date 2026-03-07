@@ -843,52 +843,46 @@ export default function App() {
           fileBuffer.current += `${new Date().toISOString()} | CONTROL_RAW | ${txt.replace(/\n/g, '')}\n`;
         }
 
-        // 【分包容错】检查 hn/hs/ch 数组是否已完整闭合
-        // 先检测是否包含了键名开头但尚未关闭
-        const hasOpenArray = /"(?:hs|ch|hn)"\s*:\s*\[[^\]]*$/.test(ctrlBuf);
-        if (hasOpenArray) {
-          addLog(`⏳ 硬件状态JSON片段拼接中...等待闭合`);
-          return; // 暂不解析，等待下个包
+        // 【铁证修正】只需检测 "ch" 数组是否闭合
+        // 因为 hn/hs 在这台 Muse S 上是字符串，不是数组！
+        const hasOpenChArray = /"ch"\s*:\s*\[[^\]]*$/.test(ctrlBuf);
+        if (hasOpenChArray) {
+          addLog(`⏳ ch数组拼接中...等待闭合`);
+          return;
         }
 
-        // 解析电池 (兼容整数和浮点数如 "bp":89.23)
+        // 解析电池
         const bpMatch = ctrlBuf.match(/"bp"\s*:\s*([\d.]+)/);
         if (bpMatch) {
           const batteryVal = Math.round(parseFloat(bpMatch[1]));
           addLog(`🔋 电池: ${batteryVal}%`);
           setBattery(batteryVal);
-          ctrlBuf = ctrlBuf.replace(/"bp"\s*:\s*[\d.]+/, '');
         }
 
-        // 解析硬件佩戴检测 (Horseshoe / Impedance)
-        // 你的【架构决策】：基于 muse-js 架构的硬件级 Horseshoe 遥测状态提取
-        let arrMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
-
-        // 当某些版本的固件使用 hn 时也予以兼容捕获
-        if (!arrMatch) {
-          arrMatch = ctrlBuf.match(/"hn"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
-        }
-
-        if (arrMatch) {
-          const v1 = parseInt(arrMatch[1], 10);
-          const v2 = parseInt(arrMatch[2], 10);
-          const v3 = parseInt(arrMatch[3], 10);
-          const v4 = parseInt(arrMatch[4], 10);
-
-          // 获取 TP9, AF7, AF8, TP10 的硬件佩戴原始值：1=Good, 2=OK, 4=Poor
-          hardwareRawRef.current = { TP9: v1, AF7: v2, AF8: v3, TP10: v4 };
-          hardwareEverReceived.current = true;
-
-          recalcTotalSignal();
-
-          addLog(`👤 硬件状态更新 TP9:${v1} AF7:${v2} AF8:${v3} TP10:${v4}`);
-          ctrlBuf = ''; // 匹配成功后直接安全清空累积缓冲，防残留
+        // 【核心修正】解析 "ch" 数组 — 真·电极阻抗数据!
+        // CONTROL_RAW 铁证：hn是设备名, hs是序列号, ch才是电极质量数组
+        const chMatch = ctrlBuf.match(/"ch"\s*:\s*\[([^\]]+)\]/);
+        if (chMatch) {
+          const rawValues = chMatch[1].split(',').map(v => {
+            const n = parseFloat(v.trim());
+            return isNaN(n) ? 4 : Math.round(n);
+          });
+          if (rawValues.length >= 4) {
+            hardwareRawRef.current = {
+              TP9: rawValues[0], AF7: rawValues[1],
+              AF8: rawValues[2], TP10: rawValues[3]
+            };
+            hardwareEverReceived.current = true;
+            recalcTotalSignal();
+            addLog(`👤 电极状态(ch) TP9:${rawValues[0]} AF7:${rawValues[1]} AF8:${rawValues[2]} TP10:${rawValues[3]}`);
+          }
+          ctrlBuf = '';
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
           addLog(`✅ 命令确认收到`);
           cmdResolve(); cmdResolve = null;
-          ctrlBuf = ctrlBuf.replace(/"rc":0/, '');
+          ctrlBuf = '';
         }
         if (ctrlBuf.length > 500) ctrlBuf = ctrlBuf.slice(-200);
       });
