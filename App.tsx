@@ -861,16 +861,16 @@ export default function App() {
         }
 
         // 解析硬件佩戴检测 (Horseshoe / Impedance)
-        // 兼容三种键名：
-        //   Muse 2:       "hs":[1,2,1,4]     (horseshoe)
-        //   Muse S Gen1:  "ch":[4.0, 4.0, ...]  (channel quality)
-        //   Muse S Gen2:  "hn":[1,1,2,4]     (hardware impedance, 你的参考代码指明)
-        let arrMatch = ctrlBuf.match(/"(?:hs|ch|hn)"\s*:\s*\[([\d.\s,]+)\]/);
+        let arrMatch = ctrlBuf.match(/"(?:hs|ch|hn)"\s*:\s*\[([^\]]+)\]/);
         if (arrMatch) {
           const valuesStr = arrMatch[1];
+          // 匹配提取包括空字符/NaN在内的数据（统一安全降为4）
           const values = valuesStr.split(',')
-            .map(v => parseFloat(v.trim()))
-            .filter(v => !isNaN(v));
+            .map(v => {
+              const numStr = v.match(/[\d.]+/)?.[0];
+              const num = parseFloat(numStr || '4');
+              return isNaN(num) ? 4 : num;
+            });
 
           if (values.length >= 4) {
             // 获取 TP9, AF7, AF8, TP10 的硬件佩戴原始值：1=Good, 2=OK, 4=Poor
@@ -886,7 +886,7 @@ export default function App() {
 
             addLog(`👤 硬件状态更新 TP9:${hardwareRawRef.current.TP9} AF7:${hardwareRawRef.current.AF7} AF8:${hardwareRawRef.current.AF8} TP10:${hardwareRawRef.current.TP10}`);
           }
-          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[\d.\s,]+\]/, '');
+          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[^\]]+\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
@@ -920,7 +920,7 @@ export default function App() {
         const museService = services.find(s => s.uuid.toLowerCase() === MUSE_SERVICE.toLowerCase());
         if (museService) {
           const chars = await museService.characteristics();
-          availableUUIDs = chars.map(c => c.uuid.toLowerCase());
+          availableUUIDs = chars.map(c => c.uuid); // 记录原始原封不动的大小写 UUID
           addLog(`✅ 发现 ${chars.length} 个 Characteristic`);
         } else {
           addLog('⚠️ 未找到 Muse 服务，尝试直接订阅…');
@@ -940,19 +940,25 @@ export default function App() {
         const uuidLower = uuid.toLowerCase();
         const channelId = uuid.substring(4, 8);
 
-        addLog(`🔍 尝试订阅通道: ${channelId} (UUID: ${uuid})`);
-
-        // EEG 和 PPG 通道强制订阅，不受 UUID 大小写影响
-        const isEssential = ['0013', '0014', '0015', '0016', '0010', '0011'].includes(channelId);
-        if (!isEssential && availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
-          addLog(`⏭️ 跳过不可用通道: ${channelId}`);
-          continue;
+        // 如果 UUID 大小写不同，这里重新映射回设备报告的原生 UUID
+        let targetUuid = uuid;
+        const matchedUuid = availableUUIDs.find(u => u.toLowerCase() === uuidLower);
+        if (matchedUuid) {
+          targetUuid = matchedUuid;
+        } else {
+          // EEG 和 PPG 通道强制订阅
+          const isEssential = ['0013', '0014', '0015', '0016', '0010', '0011'].includes(channelId);
+          if (!isEssential) {
+            addLog(`⏭️ 跳过不可用且非必要通道: ${channelId}`);
+            continue;
+          }
         }
 
         try {
+          addLog(`🔍 订阅: ${channelId} (${targetUuid})`);
           // 每个通道独立的回调计数器
           let cbCount = 0;
-          device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
+          device.monitorCharacteristicForService(MUSE_SERVICE, targetUuid, (error, char) => {
             cbCount++;
 
             // 节流：只在第1、2、3次和之后每100次打印回调诊断（避免刷屏死机）
@@ -973,7 +979,11 @@ export default function App() {
             }
           });
           subscribedCount++;
-          addLog(`✅ 成功订阅: ${channelId}`);
+
+          // 致命修复：在订阅不同通道之间必须强行注入大于 200ms 的沉睡延迟！
+          // Android 底层的 GATT 队列极为脆弱，如果瞬间抛给它 6 个 Notification 订阅，
+          // 它会默默吞掉后 5 个包导致只有 0013 被打开！（这就是你之前所有通道都不见了的根本原因）
+          await sleep(250);
         } catch (e) {
           addLog(`❌ 订阅失败 [${channelId}]: ${e}`);
         }
