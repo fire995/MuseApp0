@@ -88,53 +88,67 @@ export function analyzeFrequency(samples: number[]): { theta: number; alpha: num
 }
 
 /**
- * 部署滑动窗口 DSP 质检闸门 (Software Quality Gate)
- * 逻辑：基于 256 帧（1秒相当于256Hz）的信号池，计算时域标准差 (STD)
- * 1. 如果样本不足 256，返回宽容度得分 50，避免启动瞬间闪退分
- * 2. 算出去交直流偏置后的时域标准差
- * 3. STD 若跨越 20µV 红线，严格判定为物理脱落/肌电伪影 (返回 0分)
- * 4. STD 在 1µV 以下说明导联悬空或短路死寂，判定失效 (返回 0分)
- * 5. 否则计算健康线性质量分配：越接近红线分数越低。
+ * 基于频段（波段）的信号质量评分
+ * 
+ * 核心原理：真正的 EEG 脑电信号集中在 1-30Hz 的频段中
+ *   - Delta (1-4Hz): 深睡眠
+ *   - Theta (4-8Hz): 浅睡眠、冥想
+ *   - Alpha (8-13Hz): 放松闭眼
+ *   - Beta  (13-30Hz): 清醒活动
+ * 
+ * 如果这些频段有明显的能量，而高频噪声 (>30Hz) 占比不高，
+ * 就说明信号是好的。
  */
 export function calculateSignalQuality(samples: number[]): number {
-  if (samples.length < 256) {
+  if (samples.length < 128) {
+    return 50; // 数据不足时给中间分
+  }
+
+  try {
+    const fftSize = Math.min(256, Math.pow(2, Math.floor(Math.log2(samples.length))));
+    const fft = new FFT(fftSize);
+    const input = samples.slice(-fftSize);
+
+    // 去除直流偏置
+    const mean = input.reduce((a: number, b: number) => a + b, 0) / input.length;
+    const normalized = input.map((v: number) => v - mean);
+
+    // 死信号检测：RMS < 0.5µV → 悬空
+    let sumSq = 0;
+    for (const v of normalized) sumSq += v * v;
+    if (Math.sqrt(sumSq / fftSize) < 0.5) return 0;
+
+    // FFT
+    const out = fft.createComplexArray();
+    fft.realTransform(out, normalized);
+
+    const samplingRate = 256;
+    const freqRes = samplingRate / fftSize;
+
+    let brainPower = 0;  // 1-30Hz 脑电频段
+    let totalPower = 0;
+
+    for (let bin = 0; bin < out.length / 2; bin += 2) {
+      const freq = (bin / 2) * freqRes;
+      if (freq < 1) continue;
+      const p = out[bin] * out[bin] + out[bin + 1] * out[bin + 1];
+      totalPower += p;
+      if (freq >= 1 && freq <= 30) brainPower += p;
+    }
+
+    if (totalPower < 0.001) return 0;
+
+    // 脑电波段能量占比
+    const brainRatio = brainPower / totalPower;
+
+    // brainRatio >= 0.6 → 100分, <= 0.15 → 0分
+    let score: number;
+    if (brainRatio >= 0.6) score = 100;
+    else if (brainRatio <= 0.15) score = 0;
+    else score = ((brainRatio - 0.15) / 0.45) * 100;
+
+    return Math.max(0, Math.min(100, Math.round(score)));
+  } catch (e) {
     return 50;
   }
-
-  // 截取最近的 256 帧作为 DSP 信号窗口
-  const window = samples.slice(-256);
-
-  // 1. 去直流偏置 (计算均值)
-  let sum = 0;
-  for (let i = 0; i < 256; i++) {
-    sum += window[i];
-  }
-  const mean = sum / 256;
-
-  // 2. 计算标准差 (Standard Deviation)
-  let sumSqDiff = 0;
-  for (let i = 0; i < 256; i++) {
-    const diff = window[i] - mean;
-    sumSqDiff += diff * diff;
-  }
-  const variance = sumSqDiff / 256;
-  const stdDev = Math.sqrt(variance);
-
-  // 3. 质检闸门红线判定
-  // 红线：大于 20µV 说明发生了严重的位移、接触不良闪烁或剧烈肌电活动
-  if (stdDev > 20.0) {
-    return 0;
-  }
-
-  // 悬空：低于 1µV 几乎是平直线，通常是不通电的噪点本底
-  if (stdDev < 1.0) {
-    return 0;
-  }
-
-  // 4. 健康转换（1µV - 20µV之间）：
-  // 标准差越小代表越纯净脑波 (最高分)，标准差越大逼近运动基线 (分数下降)
-  // 当 stdDev = 1 的时候最高 100 分，当 stdDev = 20 的时候为 0 分
-  const score = 100 - ((stdDev - 1) / 19) * 100;
-
-  return Math.max(0, Math.min(100, Math.round(score)));
 }
