@@ -347,6 +347,9 @@ export default function App() {
   };
 
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
+    // 🔴 诊断日志：确认数据到达
+    addLog(`📦 [${channel}] 收到数据包 (${base64Data.length}字节)`);
+    
     // 1. 保存原始数据（仅在采集时）
     if (isSavingRef.current && logFileUri.current) {
       const timestamp = new Date().toISOString();
@@ -362,13 +365,21 @@ export default function App() {
     if (channel === '0013' || channel === '0014' || channel === '0015' || channel === '0016') {
       try {
         const samples = decodeEEG(base64Data);
+        addLog(`✅ [${channel}] 解码成功: ${samples.length}个样本`);
+        
         if (samples.length > 0) {
           processThetaWave(samples);
           // 频域分析
           const { theta, alpha } = analyzeFrequency(samples);
           analyzeDrowsiness(theta, alpha);
           
-          setPacketsRx(prev => prev + 1);
+          setPacketsRx(prev => {
+            const newCount = prev + 1;
+            if (newCount % 10 === 0) {
+              addLog(`📊 已接收 ${newCount} 个数据包`);
+            }
+            return newCount;
+          });
         }
       } catch (e) {
         addLog(`❌ [${channel}] 解码失败: ${e}`);
