@@ -42,14 +42,15 @@ const PPG_CHANNELS = ['273e0010', '273e0011']
 
 // ── Muse BLE 命令（Base64）────────────────────────────────────────
 // halt:      \x02h\n
-// p21:       \x04p21\n    Muse 2 兼容模式（分离 4 个 EEG 通道，恢复 hs 数组）
+// p1035:     \x06p1035\n  全速模式（EEG 256Hz + PPG，功耗高）
+// p21:       \x04p21\n    低功耗模式（EEG 约 50Hz，无 PPG）
 // dc001×2:   \x06dc001\n  启动数据流（必须发两次）
 // status:    \x02s\n      心跳保活
 const CMD_HALT = 'AmgK';
-const CMD_PRESET_HI = 'BHAyMQo=';   // 强制 p21 以分离通道！不是 p1035
-const CMD_PRESET_LO = 'BHAyMQo=';   // 两边都用 p21 确保稳定分离
-const CMD_START = 'BmRjMDAxCg==';   // dc001
-const CMD_STATUS = 'AnMK';          // s（心跳）
+const CMD_PRESET_HI = 'BnAxMDM1Cg==';   // p1035 高速 (恢复官方)
+const CMD_PRESET_LO = 'BHAyMQo=';       // p21 低功耗 (恢复官方)
+const CMD_START = 'BmRjMDAxCg==';       // dc001
+const CMD_STATUS = 'AnMK';              // s（心跳）
 
 // ── 类型 ─────────────────────────────────────────────────────────
 type SignalLevel = 'good' | 'ok' | 'poor' | 'none';
@@ -883,84 +884,21 @@ export default function App() {
         });
 
       await sendCmd(CMD_HALT, 'halt');
-      await sendCmd(CMD_PRESET_HI, 'preset p21 (强制分离通道)');
+      await sendCmd(CMD_PRESET_HI, 'preset p1035 高速模式');
       setSamplingMode('dense');
 
-      // 关键修复：增加等待时间让 BLE 栈完成服务发现
-      addLog('⏳ 等待 BLE 栈完成服务枚举…');
-      await sleep(1500);
-
-      // 验证 Characteristic 可用性
-      let availableUUIDs: string[] = [];
-      try {
-        const services = await device.services();
-        const museService = services.find(s => s.uuid.toLowerCase() === MUSE_SERVICE.toLowerCase());
-        if (museService) {
-          const chars = await museService.characteristics();
-          availableUUIDs = chars.map(c => c.uuid); // 记录原始原封不动的大小写 UUID
-          addLog(`✅ 发现 ${chars.length} 个 Characteristic`);
-        } else {
-          addLog('⚠️ 未找到 Muse 服务，尝试直接订阅…');
-        }
-      } catch (e) {
-        addLog(`⚠️ 服务枚举失败: ${e}，尝试直接订阅…`);
-      }
-
-      // ── 无条件全量订阅方案 ──
-      // 用户要求：所有通道所有数据都保存到一个文件，不区分。
-      let subscribedCount = 0;
-
-      // 方案A：优先使用设备发现的原生 UUID（只要它不是 Control 通道就行）
-      if (availableUUIDs.length > 0) {
-        addLog(`📚 从设备发现 ${availableUUIDs.length} 个特征值，开始【全量暴力】订阅...`);
-        for (const nativeUuid of availableUUIDs) {
-          // 跳过已经单独订阅的控制通道
-          if (nativeUuid.toLowerCase() === MUSE_CONTROL.toLowerCase()) continue;
-
-          const chId = nativeUuid.substring(4, 8).toLowerCase();
-
-          try {
-            addLog(`🔍 订阅[${chId}] UUID=${nativeUuid}`);
-            let cbCount = 0;
-            // Native UUID 结尾会有区别，利用原生给的 UUID 去订阅
-            device.monitorCharacteristicForService(MUSE_SERVICE, nativeUuid, (error, char) => {
-              cbCount++;
-              if (cbCount <= 3 || cbCount % 500 === 0) {
-                addLog(`📡 [${chId}] #${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
-              }
-              if (error) { return; } // 取消报错刷屏
-              if (char?.value) handleMuseDataPacket(chId, char.value);
-            }, nativeUuid); // 强烈注意：把 UUID 传给 transactionId，防止内部互相覆盖！
-            subscribedCount++;
-            await sleep(800); // 必须保留长延时，防止底层GATT风暴吃包
-          } catch (e) {
-            addLog(`❌ 订阅失败 [${chId}]: ${e}`);
+      // 完美还原历史版本的通道订阅逻辑（简单粗暴最有效，无sleep无拦截）
+      addLog('🛡️ 恢复经典订阅架构 (EEG + PPG)…');
+      [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
+        device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
+          if (error) return; // 取消报错打扰
+          if (char?.value) {
+            handleMuseDataPacket(uuid.substring(4, 8), char.value);
           }
-        }
-      } else {
-        // 方案B：备用-硬编码所有可能通道的暴力订阅 0002 ~ 001B
-        addLog(`⚠️ 未发现特征列表，开启【暴力盲踩】订阅...`);
-        const possibleIds = ['0013', '0014', '0015', '0016', '0010', '0011', '000e', '000f'];
-        for (const pid of possibleIds) {
-          const uuid = `273e${pid}-4c4d-454d-96be-f03bac821358`;
-          try {
-            addLog(`🔍 订阅[${pid}]`);
-            let cbCount = 0;
-            device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
-              cbCount++;
-              if (error) { return; }
-              if (char?.value) handleMuseDataPacket(pid, char.value);
-            }, uuid);
-            subscribedCount++;
-            await sleep(800);
-          } catch (e) {
-            addLog(`❌ 订阅失败 [${pid}]`);
-          }
-        }
-      }
+        });
+      });
 
-      addLog(`📡 已订阅 ${subscribedCount} 个通道`);
-
+      addLog(`📡 订阅指令已全部发出`);
       // dc001 × 2（必须发两次才能启动数据流）
       await write(device, CMD_START);
       await sleep(150);
