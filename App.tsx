@@ -184,6 +184,14 @@ export default function App() {
   // 信号平滑（10 帧中位数，彻底消除跳变）
   const signalBuf = useRef<number[]>([]);
 
+  // ── 数据流追踪（用于双因子信号计算 + 诊断） ──────────────────────
+  const lastDataTime = useRef<number>(0);          // 最近一次收到数据包的时间
+  const dataFlowActive = useRef<boolean>(false);    // 数据流是否已激活
+  const packetCountRef = useRef<number>(0);         // 总数据包计数（不触发UI）
+  const saveRowCount = useRef<number>(0);           // 保存的行数
+  const horseshoeScore = useRef<number>(0);         // 最新佩戴质量分
+  const diagnosticTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // 导入解码器，已在顶部导入
 
   const addLog = useCallback((msg: string) => {
@@ -191,16 +199,43 @@ export default function App() {
     setLogs(prev => [msg, ...prev].slice(0, 25));
   }, []);
 
-  // ── 信号质量平滑（双层中位数：后端已做一次，前端再做一次）────
-  const updateSignal = useCallback((raw: number) => {
+  // ── 双因子信号质量（佩戴贴合度 + 数据接收率）────────────────────
+  // Factor 1: horseshoe 电极贴合度（从 Control 通道解析）
+  // Factor 2: 数据接收率（EEG 数据包是否持续到达）
+  const recalcSignal = useCallback(() => {
+    const hs = horseshoeScore.current;
+    const now = Date.now();
+    const timeSinceData = now - lastDataTime.current;
+    const hasDataFlow = lastDataTime.current > 0 && timeSinceData < 5000; // 5秒内有数据
+
+    // 双因子评分逻辑:
+    // - 佩戴质量权重 60%，数据接收权重 40%
+    // - 如果完全没有数据流：上限为 25 分（即使佩戴完美）
+    // - 如果佩戴差但数据流正常：上限为 40 分
+    let combined: number;
+    if (!hasDataFlow && hs === 0) {
+      combined = 0;  // 完全没信号
+    } else if (!hasDataFlow) {
+      combined = Math.round(hs * 0.25);  // 佩戴ok但没数据
+    } else if (hs === 0) {
+      combined = 30;  // 有数据但没佩戴信息（可能 horseshoe 还没上报）
+    } else {
+      combined = Math.round(hs * 0.6 + (hasDataFlow ? 100 : 0) * 0.4);
+    }
+
     const buf = signalBuf.current;
-    buf.push(raw);
+    buf.push(combined);
     if (buf.length > 10) buf.shift();
     const sorted = [...buf].sort((a, b) => a - b);
     const mid = sorted[Math.floor(sorted.length / 2)];
     setSignalScore(mid);
     setSignalLevel(mid >= 65 ? 'good' : mid >= 35 ? 'ok' : mid > 0 ? 'poor' : 'none');
   }, []);
+
+  const updateSignal = useCallback((horseshoeRaw: number) => {
+    horseshoeScore.current = horseshoeRaw;
+    recalcSignal();
+  }, [recalcSignal]);
 
   useEffect(() => {
     setupMusicPlayer();
@@ -215,9 +250,36 @@ export default function App() {
       }
     });
 
+    // ── 周期性诊断报告（每 5 秒） ──────────────────────────────────
+    diagnosticTimer.current = setInterval(() => {
+      const now = Date.now();
+      const timeSinceData = lastDataTime.current > 0 ? ((now - lastDataTime.current) / 1000).toFixed(1) : '从未';
+      const pktTotal = packetCountRef.current;
+      const saving = isSavingRef.current;
+      const bufLen = fileBuffer.current.length;
+      const savedRows = saveRowCount.current;
+      const fileUri = logFileUri.current;
+      const hsScore = horseshoeScore.current;
+
+      // 只在连接状态下输出诊断（避免未连接时刷屏）
+      if (pktTotal > 0 || saving) {
+        addLog(`── 诊断 ──`);
+        addLog(`📡 数据流: ${pktTotal}包 | 最后收到: ${timeSinceData}秒前 | 佩戴分: ${hsScore}`);
+        if (saving) {
+          addLog(`💾 保存: ${savedRows}行已写入 | 缓冲: ${bufLen}字节 | 文件: ${fileUri ? '✓' : '✗'}`);
+        }
+      }
+
+      // 同时刷新信号评分（补充数据流因子的时效性）
+      if (lastDataTime.current > 0) {
+        recalcSignal();
+      }
+    }, 5000);
+
     return () => {
       if (heartbeat.current) clearInterval(heartbeat.current);
       if (samplingTimer.current) clearTimeout(samplingTimer.current);
+      if (diagnosticTimer.current) clearInterval(diagnosticTimer.current);
       appStateSub.remove();
     };
   }, []);
@@ -278,9 +340,19 @@ export default function App() {
   };
 
   const flushBufferToFile = async () => {
-    if (!logFileUri.current || fileBuffer.current.length === 0) return;
+    if (!logFileUri.current || fileBuffer.current.length === 0) {
+      // 诊断：如果正在保存但条件不满足，输出原因
+      if (isSavingRef.current) {
+        if (!logFileUri.current) {
+          addLog('🔴 [FLUSH] 文件URI为空！无法写入');
+        }
+        // 注意：buffer为空是正常的（没有新数据时）
+      }
+      return;
+    }
 
     const chunk = fileBuffer.current;
+    const chunkLines = chunk.split('\n').filter(l => l.length > 0).length;
     fileBuffer.current = '';
 
     try {
@@ -289,6 +361,7 @@ export default function App() {
 
       if (!fileInfo.exists) {
         // 首写必须禁用 append，并注入 CSV Header
+        addLog(`📝 [FLUSH] 文件不存在，创建并写入 ${chunkLines} 行`);
         // @ts-ignore
         await FileSystem.writeAsStringAsync(logFileUri.current, 'timestamp,channel,data\n' + chunk, {
           // @ts-ignore
@@ -304,6 +377,8 @@ export default function App() {
         });
       }
 
+      addLog(`✅ [FLUSH] 成功写入 ${chunkLines} 行 (${chunk.length}字节)`);
+
       // @ts-ignore
       const newFileInfo = await FileSystem.getInfoAsync(logFileUri.current);
       // @ts-ignore
@@ -313,7 +388,7 @@ export default function App() {
         await createNewLogFile();
       }
     } catch (e) {
-      addLog('🔴 本地写入异常');
+      addLog(`🔴 [FLUSH] 写入异常: ${e}`);
       fileBuffer.current = chunk + fileBuffer.current; // 失败则回退缓冲区
     }
   };
@@ -347,25 +422,53 @@ export default function App() {
   };
 
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
-    // 🔴 诊断日志：确认数据到达
-    addLog(`📦 [${channel}] 收到数据包 (${base64Data.length}字节)`);
+    // 更新数据流追踪（不触发 UI 渲染，只更新 ref）
+    const now = Date.now();
+    lastDataTime.current = now;
+    packetCountRef.current += 1;
+    const pktNum = packetCountRef.current;
+
+    // 首次收到数据时激活数据流并重算信号
+    if (!dataFlowActive.current) {
+      dataFlowActive.current = true;
+      addLog('✅ 数据流已激活 — 首个 EEG 数据包到达');
+      recalcSignal();
+    }
+
+    // 节流日志：每 50 个包才输出一次（避免 1500+/sec 的 addLog 冻结 UI）
+    if (pktNum <= 3 || pktNum % 50 === 0) {
+      addLog(`📦 [${channel}] #${pktNum} (${base64Data.length}字节)`);
+    }
 
     // 1. 保存原始数据（仅在采集时）
     if (isSavingRef.current && logFileUri.current) {
       const timestamp = new Date().toISOString();
       fileBuffer.current += `${timestamp},${channel},${base64Data}\n`;
+      saveRowCount.current += 1;
+
+      // 每写入第 1、10、100 行时输出诊断（确认保存管线畅通）
+      const rows = saveRowCount.current;
+      if (rows === 1 || rows === 10 || rows === 100 || rows % 500 === 0) {
+        addLog(`💾 [SAVE] 已缓存 ${rows} 行 | 缓冲区: ${fileBuffer.current.length}字节`);
+      }
 
       if (fileBuffer.current.length > 10240) {
         flushBufferToFile();
       }
+    } else if (isSavingRef.current && !logFileUri.current && pktNum % 50 === 0) {
+      // 诊断：正在保存模式但文件URI为空
+      addLog(`🔴 [SAVE] 保存已开启但 logFileUri 为空！数据丢失中`);
     }
 
     // 2. 实时解码和显示（始终运行）
-    // 0014 (AF7) 与 0015 (AF8) 是前额叶电极，对 Theta 冥想波形最为敏感
+    // 所有 EEG 通道都用于波形和频域分析
     if (channel === '0013' || channel === '0014' || channel === '0015' || channel === '0016') {
       try {
         const samples = decodeEEG(base64Data);
-        addLog(`✅ [${channel}] 解码成功: ${samples.length}个样本`);
+
+        if (pktNum <= 3) {
+          addLog(`✅ [${channel}] 解码: ${samples.length}样本 [${samples.slice(0, 3).map(v => v.toFixed(1)).join(', ')}...]`);
+        }
 
         if (samples.length > 0) {
           processThetaWave(samples);
@@ -373,13 +476,7 @@ export default function App() {
           const { theta, alpha } = analyzeFrequency(samples);
           analyzeDrowsiness(theta, alpha);
 
-          setPacketsRx(prev => {
-            const newCount = prev + 1;
-            if (newCount % 10 === 0) {
-              addLog(`📊 已接收 ${newCount} 个数据包`);
-            }
-            return newCount;
-          });
+          setPacketsRx(prev => prev + 1);
         }
       } catch (e) {
         addLog(`❌ [${channel}] 解码失败: ${e}`);
@@ -425,7 +522,9 @@ export default function App() {
     if (!isSaving) {
       // 开始保存
       setIsSaving(true);
+      saveRowCount.current = 0; // 重置行计数器
       addLog(`💾 开始保存数据`);
+      addLog(`💾 [SAVE] isSavingRef=${isSavingRef.current} → 即将设为 true`);
 
       // 创建带时间戳的数据文件并写入 CSV 头
       try {
@@ -433,12 +532,14 @@ export default function App() {
         const fileName = `muse_data_${timeStr}.csv`;
         // @ts-ignore
         const uri = `${FileSystem.documentDirectory}${fileName}`;
+        addLog(`💾 [SAVE] 准备创建文件: ${uri}`);
         // @ts-ignore
         await FileSystem.writeAsStringAsync(uri, 'timestamp,channel,data\n', { encoding: FileSystem.EncodingType.UTF8 });
         logFileUri.current = uri;
         fileBuffer.current = ''; // 清空缓冲区，避免残留旧数据
         setSavePath(fileName);
         addLog(`📁 数据文件已创建: ${fileName}`);
+        addLog(`💾 [SAVE] logFileUri 已设置, 数据包到达将自动写入`);
       } catch (e) {
         addLog(`🔴 创建数据文件失败: ${e}`);
         setIsSaving(false);
@@ -741,23 +842,26 @@ export default function App() {
         }
 
         try {
+          // 每个通道独立的回调计数器
+          let cbCount = 0;
           device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
-            // 🔴 诊断日志：打印回调触发情况
-            addLog(`🔴 [${channelId}] 回调触发 - error: ${error ? 'YES' : 'NO'}, char: ${char ? 'YES' : 'NO'}`);
+            cbCount++;
+
+            // 节流：只在第1、2、3次和之后每100次打印回调诊断（避免刷屏死机）
+            if (cbCount <= 3 || cbCount % 100 === 0) {
+              addLog(`📡 [${channelId}] 回调#${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
+            }
 
             if (error) {
-              addLog(`⚠️ 通道订阅异常 [${channelId}]: ${error.message}`);
+              addLog(`⚠️ 通道异常 [${channelId}]: ${error.message}`);
               return;
             }
 
             if (char?.value) {
-              // 🔴 诊断日志：打印原始 Base64 数据
-              addLog(`📊 [${channelId}] 原始数据: ${char.value.substring(0, 50)}... (长度=${char.value.length})`);
-              // 始终将数据分发到处理管线，内部判断是否保存
+              // 直接分发到处理管线（日志在 handleMuseDataPacket 内节流输出）
               handleMuseDataPacket(channelId, char.value);
-            } else {
-              // 🔴 诊断日志：记录空数据包
-              addLog(`⚠️ [${channelId}] 收到空数据包`);
+            } else if (cbCount <= 5) {
+              addLog(`⚠️ [${channelId}] 空数据包`);
             }
           });
           subscribedCount++;
@@ -899,11 +1003,15 @@ export default function App() {
 
   // ── 信号样式 ─────────────────────────────────────────────────
   const SIG = {
-    good: { color: '#00E676', label: '信号良好 ✓', desc: '采集质量优秀，数据可用于分析' },
-    ok: { color: '#FFCA28', label: '信号一般 — 调整头环', desc: '数据基本可用，建议调整佩戴' },
-    poor: { color: '#FF5252', label: '信号差 — 重新佩戴', desc: '建议取下重新佩戴后再试' },
+    good: { color: '#00E676', label: '信号良好 ✓', desc: '佩戴贴合 · 数据流畅通' },
+    ok: { color: '#FFCA28', label: '信号一般 — 调整头环', desc: '请调整佩戴或等待数据流稳定' },
+    poor: { color: '#FF5252', label: '信号差 — 重新佩戴', desc: '佩戴松动或数据中断' },
     none: { color: '#555', label: '未连接 / 等待数据', desc: '' },
   }[signalLevel];
+
+  // 数据流子指标（用于 UI 显示）
+  const dataFlowColor = packetsRx > 0 ? '#00E676' : '#FF5252';
+  const dataFlowLabel = packetsRx > 0 ? '✓ 数据接收中' : '✗ 无数据';
 
   // ── 渲染 ─────────────────────────────────────────────────────
   return (
@@ -920,7 +1028,7 @@ export default function App() {
         </View>
       </View>
 
-      {/* 信号状态 */}
+      {/* 信号状态 - 双因子 */}
       <View style={[s.sigCard, { borderColor: SIG.color }]}>
         <View style={{ gap: 6 }}>
           <View style={[s.sigDot, { backgroundColor: SIG.color }]} />
@@ -937,6 +1045,11 @@ export default function App() {
         <View style={{ flex: 1 }}>
           <Text style={[s.sigLabel, { color: SIG.color }]}>{SIG.label}</Text>
           {SIG.desc ? <Text style={s.sigDesc}>{SIG.desc}</Text> : null}
+          {/* 双因子细节 */}
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+            <Text style={{ fontSize: 10, color: '#777' }}>佩戴: {Object.values(electrodeQuality).filter(v => v >= 65).length}/4</Text>
+            <Text style={{ fontSize: 10, color: dataFlowColor }}>{dataFlowLabel}</Text>
+          </View>
         </View>
         <View style={{ alignItems: 'flex-end', gap: 4 }}>
           {signalScore > 0 && (
