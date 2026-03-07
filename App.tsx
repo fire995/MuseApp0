@@ -499,17 +499,11 @@ export default function App() {
 
       // 写入全部完整数据
       const timestamp = new Date().toISOString();
-      // 在 TXT 里打印 hw=[TP9,AF7,AF8,TP10] 原始值（1/2/4），替代之前的杂糅值
       const line = `${timestamp} | ch=${channel} | sig=${sig} | hw=[${hwStr}] | ${base64Data}\n`;
       fileBuffer.current += line;
       saveRowCount.current += 1;
 
-      const rows = saveRowCount.current;
-      if (rows === 1 || rows === 50 || rows === 500 || rows % 2000 === 0) {
-        addLog(`💾 [SAVE] 已缓存 ${rows} 行 (全量高速接收中)`);
-      }
-
-      // 因为数据非常多，我们提升刷盘阈值为 256KB 减少 IO 卡顿
+      // 写入文件缓冲
       if (fileBuffer.current.length > 256 * 1024) {
         flushBufferToFile();
       }
@@ -840,10 +834,14 @@ export default function App() {
           return;
         }
 
-        addLog(`📡 Control 通道收到数据: ${char.value.substring(0, 50)}...`);
         const txt = Buffer.from(char.value, 'base64').toString();
         addLog(`📡 Control raw: ${txt.substring(0, 120)}`);
         ctrlBuf += txt;
+
+        // 【调试功能】把 Control 通道的原生字符串硬写入保存中！寻找真正的格式
+        if (isSavingRef.current && logFileUri.current) {
+          fileBuffer.current += `${new Date().toISOString()} | CONTROL_RAW | ${txt.replace(/\n/g, '')}\n`;
+        }
 
         // 【分包容错】检查 hn/hs/ch 数组是否已完整闭合
         // 先检测是否包含了键名开头但尚未关闭
@@ -863,32 +861,22 @@ export default function App() {
         }
 
         // 解析硬件佩戴检测 (Horseshoe / Impedance)
-        let arrMatch = ctrlBuf.match(/"(?:hs|ch|hn)"\s*:\s*\[([^\]]+)\]/);
+        // 使用非常严格的正则（向 信号参考.py 完全看齐）
+        let arrMatch = ctrlBuf.match(/"(?:hs|ch|hn)"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
         if (arrMatch) {
-          const valuesStr = arrMatch[1];
-          // 匹配提取包括空字符/NaN在内的数据（统一安全降为4）
-          const values = valuesStr.split(',')
-            .map(v => {
-              const numStr = v.match(/[\d.]+/)?.[0];
-              const num = parseFloat(numStr || '4');
-              return isNaN(num) ? 4 : num;
-            });
+          const v1 = parseInt(arrMatch[1], 10);
+          const v2 = parseInt(arrMatch[2], 10);
+          const v3 = parseInt(arrMatch[3], 10);
+          const v4 = parseInt(arrMatch[4], 10);
 
-          if (values.length >= 4) {
-            // 获取 TP9, AF7, AF8, TP10 的硬件佩戴原始值：1=Good, 2=OK, 4=Poor
-            hardwareRawRef.current = {
-              TP9: Math.round(values[0] || 4),
-              AF7: Math.round(values[1] || 4),
-              AF8: Math.round(values[2] || 4),
-              TP10: Math.round(values[3] || 4)
-            };
-            hardwareEverReceived.current = true;
+          // 获取 TP9, AF7, AF8, TP10 的硬件佩戴原始值：1=Good, 2=OK, 4=Poor
+          hardwareRawRef.current = { TP9: v1, AF7: v2, AF8: v3, TP10: v4 };
+          hardwareEverReceived.current = true;
 
-            recalcTotalSignal();
+          recalcTotalSignal();
 
-            addLog(`👤 硬件状态更新 TP9:${hardwareRawRef.current.TP9} AF7:${hardwareRawRef.current.AF7} AF8:${hardwareRawRef.current.AF8} TP10:${hardwareRawRef.current.TP10}`);
-          }
-          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[^\]]+\]/, '');
+          addLog(`👤 硬件状态更新 TP9:${v1} AF7:${v2} AF8:${v3} TP10:${v4}`);
+          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[\s\d,]+\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
@@ -981,8 +969,9 @@ export default function App() {
           });
           subscribedCount++;
 
-          // 强制沉睡延迟，避免 Android 原生层堆栈爆破吞噬 Subscription 指令
-          await sleep(250);
+          // 强制沉睡延迟极度增加！给底层 Android GATT 队列充分的缓冲时间
+          // 避免瞬间的批量订阅导致部分通道的 Notification 特征开启失败
+          await sleep(1000);
         } catch (e) {
           addLog(`❌ 订阅失败 [${channelId}]: ${e}`);
         }
