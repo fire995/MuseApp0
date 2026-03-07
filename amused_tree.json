@@ -1,0 +1,405 @@
+[
+  {
+    "path": ".gitignore",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "8dbf645245a810197369d69fe383384977fcb8ba",
+    "size": 515,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/8dbf645245a810197369d69fe383384977fcb8ba"
+  },
+  {
+    "path": "DESCRIPTION.md",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "5c1a5c5c177861ef43a569371621bc3ab2e562ff",
+    "size": 4627,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/5c1a5c5c177861ef43a569371621bc3ab2e562ff"
+  },
+  {
+    "path": "LICENSE",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "b3e22baddd89889b548b6927e8ca9c44f71f72ea",
+    "size": 1063,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/b3e22baddd89889b548b6927e8ca9c44f71f72ea"
+  },
+  {
+    "path": "PROJECT_SUMMARY.md",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "369bcda642b2df683a3e1fb7f854c3e36e606413",
+    "size": 4559,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/369bcda642b2df683a3e1fb7f854c3e36e606413"
+  },
+  {
+    "path": "README.md",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "67f271ff278c1756eca12e715dced3898fb6034e",
+    "size": 7718,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/67f271ff278c1756eca12e715dced3898fb6034e"
+  },
+  {
+    "path": "RELEASE_NOTES.md",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "786723ab90a3c79e1ec5cc364800a134779af6b0",
+    "size": 1763,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/786723ab90a3c79e1ec5cc364800a134779af6b0"
+  },
+  {
+    "path": "TEST_STATUS.md",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "d456ffa7e3ed32510e3c8d3bc41040903c82b597",
+    "size": 951,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/d456ffa7e3ed32510e3c8d3bc41040903c82b597"
+  },
+  {
+    "path": "__init__.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "3f8dbcc5ac733576946cbbed77cb41ba6e6be796",
+    "size": 2695,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/3f8dbcc5ac733576946cbbed77cb41ba6e6be796"
+  },
+  {
+    "path": "examples",
+    "mode": "040000",
+    "type": "tree",
+    "sha": "0c7e863833acf15b39a72938dd25738f8b73d060",
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/trees/0c7e863833acf15b39a72938dd25738f8b73d060"
+  },
+  {
+    "path": "examples/01_basic_streaming.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "d070e7013ad7eaf3fd050b91386a9e31cbdbe7e5",
+    "size": 2091,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/d070e7013ad7eaf3fd050b91386a9e31cbdbe7e5"
+  },
+  {
+    "path": "examples/02_full_sensors.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "b25167f50efe9a5543c8e3755e4805fd7f8c3c27",
+    "size": 3070,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/b25167f50efe9a5543c8e3755e4805fd7f8c3c27"
+  },
+  {
+    "path": "examples/03_parse_data.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "7786c6b8d02ac2d8f0c090f991f84f4c89920ba4",
+    "size": 3785,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/7786c6b8d02ac2d8f0c090f991f84f4c89920ba4"
+  },
+  {
+    "path": "examples/04_stream_with_callbacks.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "58646ec8d37228330f79610e8fc397248197fbbd",
+    "size": 5975,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/58646ec8d37228330f79610e8fc397248197fbbd"
+  },
+  {
+    "path": "examples/05_save_and_replay.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "b43ab58834a2f4d137dda5b88e03c62f7908f037",
+    "size": 7640,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/b43ab58834a2f4d137dda5b88e03c62f7908f037"
+  },
+  {
+    "path": "examples/06_heart_monitor.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "67993dbb621af6e7f95bf5c4fcc1782dc2780003",
+    "size": 7561,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/67993dbb621af6e7f95bf5c4fcc1782dc2780003"
+  },
+  {
+    "path": "examples/07_lsl_style_viz.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "975ad2269dad4464f0a72a9545193d8cb336976f",
+    "size": 10033,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/975ad2269dad4464f0a72a9545193d8cb336976f"
+  },
+  {
+    "path": "examples/09_frequency_display.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "6ab5497e3d45e50348c8ea7f4bb05d1097de1c24",
+    "size": 11435,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/6ab5497e3d45e50348c8ea7f4bb05d1097de1c24"
+  },
+  {
+    "path": "examples/recorded_sessions",
+    "mode": "040000",
+    "type": "tree",
+    "sha": "31b0712ca660131ec25aeab3cca0452344629bbd",
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/trees/31b0712ca660131ec25aeab3cca0452344629bbd"
+  },
+  {
+    "path": "examples/recorded_sessions/muse_20250824_202226.bin",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "5246fe79dbd35db11a53a5d2b73c96c06ede896a",
+    "size": 23386,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/5246fe79dbd35db11a53a5d2b73c96c06ede896a"
+  },
+  {
+    "path": "muse_data",
+    "mode": "040000",
+    "type": "tree",
+    "sha": "868ac7e5ded92e89e9ba7f7e7b416cbbd41269cb",
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/trees/868ac7e5ded92e89e9ba7f7e7b416cbbd41269cb"
+  },
+  {
+    "path": "muse_data/muse_20250824_172756.bin",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "705a5d14196a8c8e78094eb4e83d1140d8966c95",
+    "size": 28122,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/705a5d14196a8c8e78094eb4e83d1140d8966c95"
+  },
+  {
+    "path": "muse_data_parser.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "b5b2f039b4de067336d7807ec9499f47425ca723",
+    "size": 10815,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/b5b2f039b4de067336d7807ec9499f47425ca723"
+  },
+  {
+    "path": "muse_discovery.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "a67d427d6f2a83ae2043da2bd0190025e9d0aef5",
+    "size": 5693,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/a67d427d6f2a83ae2043da2bd0190025e9d0aef5"
+  },
+  {
+    "path": "muse_discovery_gui.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "e263da612556f27c6243bdff90f8cda5c0af6d5f",
+    "size": 9515,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/e263da612556f27c6243bdff90f8cda5c0af6d5f"
+  },
+  {
+    "path": "muse_exact_client.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "7578cae766120a25853f0e76e85b6fffa5e7b451",
+    "size": 14875,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/7578cae766120a25853f0e76e85b6fffa5e7b451"
+  },
+  {
+    "path": "muse_fnirs_processor.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "70318a4913725444501689ee29a6be9ed4ad64c5",
+    "size": 16009,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/70318a4913725444501689ee29a6be9ed4ad64c5"
+  },
+  {
+    "path": "muse_integrated_parser.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "6d62e8e08c6d31c5b2522f474074ef23d42bd532",
+    "size": 15184,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/6d62e8e08c6d31c5b2522f474074ef23d42bd532"
+  },
+  {
+    "path": "muse_ppg_heart_rate.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "d6e59312572656382552ebed1a94ccd594e2daba",
+    "size": 12112,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/d6e59312572656382552ebed1a94ccd594e2daba"
+  },
+  {
+    "path": "muse_raw_stream.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "10aa8771b68691e639882a3fc883d3691467c81c",
+    "size": 14992,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/10aa8771b68691e639882a3fc883d3691467c81c"
+  },
+  {
+    "path": "muse_realtime_decoder.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "984aec8aa5494c19178a71d162c6aa5a926dd8da",
+    "size": 14737,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/984aec8aa5494c19178a71d162c6aa5a926dd8da"
+  },
+  {
+    "path": "muse_replay.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "dd7167c77a022be9f0a2797ca44d5cfe50e3554a",
+    "size": 16264,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/dd7167c77a022be9f0a2797ca44d5cfe50e3554a"
+  },
+  {
+    "path": "muse_sleep_client.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "700e0bb02b6896069263ca7e21f20b088b905d1a",
+    "size": 21538,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/700e0bb02b6896069263ca7e21f20b088b905d1a"
+  },
+  {
+    "path": "muse_sleep_parser.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "e60268d9911446071351250d4c63c751a8bd46e7",
+    "size": 17927,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/e60268d9911446071351250d4c63c751a8bd46e7"
+  },
+  {
+    "path": "muse_stream_client.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "61bf907913e4985d16e57c9245d7c7fdabe2a5ea",
+    "size": 17295,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/61bf907913e4985d16e57c9245d7c7fdabe2a5ea"
+  },
+  {
+    "path": "muse_visualizer.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "c817040a4bbc68b5cf22018a8a7f80f3ce454d12",
+    "size": 29798,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/c817040a4bbc68b5cf22018a8a7f80f3ce454d12"
+  },
+  {
+    "path": "pyproject.toml",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "09f0a186d973d87087df025ffb2c69cd6d1d93e1",
+    "size": 2359,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/09f0a186d973d87087df025ffb2c69cd6d1d93e1"
+  },
+  {
+    "path": "requirements-viz.txt",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "7334113ac06872bc93910e13b13689d8f6a6212c",
+    "size": 912,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/7334113ac06872bc93910e13b13689d8f6a6212c"
+  },
+  {
+    "path": "run_tests.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "46fd2fce9843aeb7e1fe67f822656b8dfae1602b",
+    "size": 2187,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/46fd2fce9843aeb7e1fe67f822656b8dfae1602b"
+  },
+  {
+    "path": "setup.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "410d5ba7f156ecdcc6e456559220416800d13775",
+    "size": 252,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/410d5ba7f156ecdcc6e456559220416800d13775"
+  },
+  {
+    "path": "tests",
+    "mode": "040000",
+    "type": "tree",
+    "sha": "778b3ad235b2087b44752580aae14d22380bd62f",
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/trees/778b3ad235b2087b44752580aae14d22380bd62f"
+  },
+  {
+    "path": "tests/real_test_data.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "427193144b79ff0387800c1086e534f13a3b180a",
+    "size": 5091,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/427193144b79ff0387800c1086e534f13a3b180a"
+  },
+  {
+    "path": "tests/record_test_data.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "3c522b440fec2cbd8830fc2a9b208fa3b73f24cd",
+    "size": 7021,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/3c522b440fec2cbd8830fc2a9b208fa3b73f24cd"
+  },
+  {
+    "path": "tests/test_data",
+    "mode": "040000",
+    "type": "tree",
+    "sha": "e48314279246294cd01d9d42576f9b5753a88f4a",
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/trees/e48314279246294cd01d9d42576f9b5753a88f4a"
+  },
+  {
+    "path": "tests/test_data/muse_20250824_172756.bin",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "705a5d14196a8c8e78094eb4e83d1140d8966c95",
+    "size": 28122,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/705a5d14196a8c8e78094eb4e83d1140d8966c95"
+  },
+  {
+    "path": "tests/test_data/muse_20250824_172756_samples.json",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "2dc9e5199f5cb4359822aa8257c641f705d62bb7",
+    "size": 8000,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/2dc9e5199f5cb4359822aa8257c641f705d62bb7"
+  },
+  {
+    "path": "tests/test_integration.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "5893b385333e34db0391c0a5875f5f344842feee",
+    "size": 14645,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/5893b385333e34db0391c0a5875f5f344842feee"
+  },
+  {
+    "path": "tests/test_minimal.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "0517fb5ad3612747ac025cf608a093354b255c85",
+    "size": 3362,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/0517fb5ad3612747ac025cf608a093354b255c85"
+  },
+  {
+    "path": "tests/test_ppg_fnirs.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "5ab41960ea36d2b36a3cb3602761f3ef97715eae",
+    "size": 8828,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/5ab41960ea36d2b36a3cb3602761f3ef97715eae"
+  },
+  {
+    "path": "tests/test_ppg_fnirs_fast.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "b3b88a2e1e4810f8f6d49a3eb96170a522d7d18c",
+    "size": 2850,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/b3b88a2e1e4810f8f6d49a3eb96170a522d7d18c"
+  },
+  {
+    "path": "tests/test_raw_stream.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "26b064e349d8fe8dcf363af22ae88658709e7f59",
+    "size": 6970,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/26b064e349d8fe8dcf363af22ae88658709e7f59"
+  },
+  {
+    "path": "tests/test_realtime_decoder.py",
+    "mode": "100644",
+    "type": "blob",
+    "sha": "392a3ce3b8098e49ee65a4a21e92419a2ec44954",
+    "size": 5238,
+    "url": "https://api.github.com/repos/Amused-EEG/amused-py/git/blobs/392a3ce3b8098e49ee65a4a21e92419a2ec44954"
+  }
+]

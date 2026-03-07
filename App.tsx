@@ -42,15 +42,14 @@ const PPG_CHANNELS = ['273e0010', '273e0011']
 
 // ── Muse BLE 命令（Base64）────────────────────────────────────────
 // halt:      \x02h\n
-// p1035:     \x06p1035\n  全速模式（EEG 256Hz + PPG，功耗高）
-// p21:       \x04p21\n    低功耗模式（EEG 约 50Hz，无 PPG）
+// p21:       \x04p21\n    Muse 2 兼容模式（分离 4 个 EEG 通道，恢复 hs 数组）
 // dc001×2:   \x06dc001\n  启动数据流（必须发两次）
 // status:    \x02s\n      心跳保活
 const CMD_HALT = 'AmgK';
-const CMD_PRESET_HI = 'BnAxMDM1Cg==';   // p1035 高速
-const CMD_PRESET_LO = 'BHAyMQo=';        // p21   低功耗
+const CMD_PRESET_HI = 'BHAyMQo=';   // 强制 p21 以分离通道！不是 p1035
+const CMD_PRESET_LO = 'BHAyMQo=';   // 两边都用 p21 确保稳定分离
 const CMD_START = 'BmRjMDAxCg==';   // dc001
-const CMD_STATUS = 'AnMK';            // s（心跳）
+const CMD_STATUS = 'AnMK';          // s（心跳）
 
 // ── 类型 ─────────────────────────────────────────────────────────
 type SignalLevel = 'good' | 'ok' | 'poor' | 'none';
@@ -820,11 +819,10 @@ export default function App() {
           fileBuffer.current += `${new Date().toISOString()} | CONTROL_RAW | ${txt.replace(/\n/g, '')}\n`;
         }
 
-        // 【铁证修正】只需检测 "ch" 数组是否闭合
-        // 因为 hn/hs 在这台 Muse S 上是字符串，不是数组！
-        const hasOpenChArray = /"ch"\s*:\s*\[[^\]]*$/.test(ctrlBuf);
-        if (hasOpenChArray) {
-          addLog(`⏳ ch数组拼接中...等待闭合`);
+        // 【分包容错】检查 hs/ch/hn 数组是否闭合
+        const hasOpenArray = /"(?:ch|hs|hn)"\s*:\s*\[[^\]]*$/.test(ctrlBuf);
+        if (hasOpenArray) {
+          addLog(`⏳ 状态数组拼接中...等待闭合`);
           return;
         }
 
@@ -836,23 +834,35 @@ export default function App() {
           setBattery(batteryVal);
         }
 
-        // 【核心修正】解析 "ch" 数组 — 真·电极阻抗数据!
-        // CONTROL_RAW 铁证：hn是设备名, hs是序列号, ch才是电极质量数组
-        const chMatch = ctrlBuf.match(/"ch"\s*:\s*\[([^\]]+)\]/);
-        if (chMatch) {
-          const rawValues = chMatch[1].split(',').map(v => {
-            const n = parseFloat(v.trim());
-            return isNaN(n) ? 4 : Math.round(n);
-          });
-          if (rawValues.length >= 4) {
-            hardwareRawRef.current = {
-              TP9: rawValues[0], AF7: rawValues[1],
-              AF8: rawValues[2], TP10: rawValues[3]
-            };
-            hardwareEverReceived.current = true;
-            recalcTotalSignal();
-            addLog(`👤 电极状态(ch) TP9:${rawValues[0]} AF7:${rawValues[1]} AF8:${rawValues[2]} TP10:${rawValues[3]}`);
+        // 解析电极质量 (兼容不同的固件版本和 Preset)
+        // p21 会发出 "hs": [1, 2, 4, 1] 这种数组
+        // p1035 会不发出 hs 数组，可能发出 "ch": [0,0] 等
+        let hwValues: number[] | null = null;
+        let sensorKey = '';
+
+        const hsMatch = ctrlBuf.match(/"(?:hs|hn)"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+        if (hsMatch) {
+          hwValues = [parseInt(hsMatch[1]), parseInt(hsMatch[2]), parseInt(hsMatch[3]), parseInt(hsMatch[4])];
+          sensorKey = 'hs';
+        } else {
+          const chMatch = ctrlBuf.match(/"ch"\s*:\s*\[([^\]]+)\]/);
+          if (chMatch) {
+            const rawValues = chMatch[1].split(',').map(v => parseInt(v.trim()));
+            if (rawValues.length >= 4) {
+              hwValues = rawValues.slice(0, 4);
+              sensorKey = 'ch';
+            }
           }
+        }
+
+        if (hwValues && hwValues.length >= 4) {
+          hardwareRawRef.current = {
+            TP9: hwValues[0], AF7: hwValues[1],
+            AF8: hwValues[2], TP10: hwValues[3]
+          };
+          hardwareEverReceived.current = true;
+          recalcTotalSignal();
+          addLog(`👤 电极状态(${sensorKey}) TP9:${hwValues[0]} AF7:${hwValues[1]} AF8:${hwValues[2]} TP10:${hwValues[3]}`);
           ctrlBuf = '';
         }
 
@@ -873,7 +883,7 @@ export default function App() {
         });
 
       await sendCmd(CMD_HALT, 'halt');
-      await sendCmd(CMD_PRESET_HI, 'preset p1035 高速模式');
+      await sendCmd(CMD_PRESET_HI, 'preset p21 (强制分离通道)');
       setSamplingMode('dense');
 
       // 关键修复：增加等待时间让 BLE 栈完成服务发现
