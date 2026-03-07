@@ -483,30 +483,28 @@ export default function App() {
       addLog(`📦 [${channel}] #${pktNum} (${base64Data.length}字节)`);
     }
 
-    // 1. 简化保存：每 0.5 秒写一行摘要到 TXT（不再保存每个原始包）
+    // 1. 全量保存原始数据（TXT 格式）：不再经过 0.5s 节流，保存所有的 EEG 包
     if (isSavingRef.current && logFileUri.current) {
-      if (now - lastSaveTime.current >= 500) {
-        lastSaveTime.current = now;
-        const timestamp = new Date().toISOString();
-        // 取当前电极质量和信号分
-        const hs = horseshoeScore.current;
-        const sig = signalBuf.current.length > 0
-          ? signalBuf.current[signalBuf.current.length - 1]
-          : 0;
-        // 简化格式：时间 | 通道 | 信号分 | 佩戴分 | base64数据前64字符
-        const line = `${timestamp} | ch=${channel} | sig=${sig} | hs=${hs} | ${base64Data.substring(0, 64)}\n`;
-        fileBuffer.current += line;
-        saveRowCount.current += 1;
+      // 取当前电极质量和信号分
+      const hs = horseshoeScore.current;
+      const sig = signalBuf.current.length > 0
+        ? signalBuf.current[signalBuf.current.length - 1]
+        : 0;
 
-        const rows = saveRowCount.current;
-        if (rows === 1 || rows === 10 || rows === 50 || rows % 100 === 0) {
-          addLog(`💾 [SAVE] 已缓存 ${rows} 行 (0.5秒/行)`);
-        }
+      // 写入全部完整数据（不再截断前64字符）
+      const timestamp = new Date().toISOString();
+      const line = `${timestamp} | ch=${channel} | sig=${sig} | hs=${hs} | ${base64Data}\n`;
+      fileBuffer.current += line;
+      saveRowCount.current += 1;
 
-        // 缓冲区超过 50KB 就刷盘（TXT 行少很多，不会太大）
-        if (fileBuffer.current.length > 50 * 1024) {
-          flushBufferToFile();
-        }
+      const rows = saveRowCount.current;
+      if (rows === 1 || rows === 50 || rows === 500 || rows % 2000 === 0) {
+        addLog(`💾 [SAVE] 已缓存 ${rows} 行 (全量高速接收中)`);
+      }
+
+      // 因为数据非常多，我们提升刷盘阈值为 256KB 减少 IO 卡顿
+      if (fileBuffer.current.length > 256 * 1024) {
+        flushBufferToFile();
       }
     }
 
@@ -593,7 +591,7 @@ export default function App() {
         const uri = `${FileSystem.documentDirectory}${fileName}`;
 
         // 写入文件头
-        const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样间隔: 0.5秒\n格式: 时间 | 通道 | 信号分 | 佩戴分 | 数据\n${'='.repeat(60)}\n`;
+        const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: 全量原始包\n格式: 时间 | 通道 | 信号分 | 佩戴分 | 完整12bit原流Base64数据\n${'='.repeat(60)}\n`;
         // @ts-ignore
         await FileSystem.writeAsStringAsync(uri, header, { encoding: FileSystem.EncodingType.UTF8 });
         logFileUri.current = uri;
