@@ -214,44 +214,22 @@ export default function App() {
     setLogs(prev => [msg, ...prev].slice(0, 25));
   }, []);
 
-  // ── 信号总分算法 (总分100 = 硬件60分 + 波形40分) ────────────────────
+  // ── 信号总分算法 (100% 基于软件波形分析，因为这台 Muse S 不发送硬件电极组数据) ──────
   const recalcTotalSignal = useCallback(() => {
     const newUIQuality: Record<string, number> = {};
 
-    // 硬件分计算（仅在收到过硌件包时才用）
-    let hwScore = 0;
-    if (hardwareEverReceived.current) {
-      ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
-        const hwValue = hardwareRawRef.current[ch];
-        if (hwValue === 1) {
-          hwScore += 15;
-          newUIQuality[ch] = 100; // UI绿灯
-        } else if (hwValue === 2) {
-          hwScore += 10;
-          newUIQuality[ch] = 50;  // UI黄灯
-        } else {
-          hwScore += 0;
-          newUIQuality[ch] = 0;   // UI红灯
-        }
-      });
-    } else {
-      // 还没收到过硬件数据时，硬件分按中等给分，不强制为0
-      hwScore = 30; // 给一个中等分，避免叡死在0
-      ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
-        newUIQuality[ch] = 50; // 黄灯表示等待硬件状态
-      });
-    }
+    // 纯软件分析：每个通道独立评分 0-100
+    ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
+      const sq = softwareRawRef.current[ch] || 0;
+      newUIQuality[ch] = sq;
+    });
 
-    // 软件分计算（波形分析） —— 占 40 分
-    const softValues = Object.values(softwareRawRef.current);
-    const avgSoft = softValues.reduce((a, b) => a + b, 0) / 4;
-    const swScore = avgSoft * 0.4;
-
-    // 更新各通道圆圈灯光颜色
     setElectrodeQuality(newUIQuality);
 
-    // 计算总分
-    let finalScore = Math.round(hwScore + swScore);
+    // 总分 = 4个通道软件分的平均值
+    const softValues = Object.values(softwareRawRef.current);
+    const avgSoft = softValues.reduce((a, b) => a + b, 0) / Math.max(softValues.length, 1);
+    let finalScore = Math.round(avgSoft);
 
     // 若在5秒内根本没收到数据，强行降为 0 分
     const now = Date.now();
@@ -260,7 +238,6 @@ export default function App() {
       finalScore = 0;
     }
 
-    // 信号分平滑处理机制
     const buf = signalBuf.current;
     buf.push(finalScore);
     if (buf.length > 5) buf.shift();
@@ -919,65 +896,63 @@ export default function App() {
         addLog(`⚠️ 服务枚举失败: ${e}，尝试直接订阅…`);
       }
 
-      addLog('🛡️ 订阅 EEG + PPG 通道…');
-      addLog(`📋 ATHENA_CHANNELS: ${ATHENA_CHANNELS.join(', ')}`);
-      addLog(`📋 PPG_CHANNELS: ${PPG_CHANNELS.join(', ')}`);
-
-      // 隔离双模态订阅路由：彻底分离 EEG 脑电波与 fNIRS 光学传感器的通道映射，按需启停
-      const allChannels = [...ATHENA_CHANNELS, ...PPG_CHANNELS];
+      // ── 全新的通道订阅方案：直接遍历设备报告的原生特征值 UUID ──
+      // 不再使用硬编码的UUID，而是直接用服务发现返回的 Characteristic 对象
+      const EEG_IDS = ['0013', '0014', '0015', '0016'];
+      const PPG_IDS = ['0010', '0011'];
+      const WANTED_IDS = ENABLE_PPG_SUBSCRIBE ? [...EEG_IDS, ...PPG_IDS] : EEG_IDS;
       let subscribedCount = 0;
-      const subscribeChannels = ENABLE_PPG_SUBSCRIBE ? allChannels : ATHENA_CHANNELS;
 
-      for (const uuid of subscribeChannels) {
-        const uuidLower = uuid.toLowerCase();
-        const channelId = uuid.substring(4, 8);
+      // 方案A：优先使用设备发现的原生 UUID
+      if (availableUUIDs.length > 0) {
+        addLog(`📚 从设备发现的 ${availableUUIDs.length} 个特征值中订阅...`);
+        for (const nativeUuid of availableUUIDs) {
+          // 提取第5~8个字符作为通道ID
+          const chId = nativeUuid.substring(4, 8).toLowerCase();
+          if (!WANTED_IDS.includes(chId)) continue;
 
-        // 如果 UUID 大小写不同，这里重新映射回设备报告的原生 UUID
-        let targetUuid = uuid;
-        const matchedUuid = availableUUIDs.find(u => u.toLowerCase() === uuidLower);
-        if (matchedUuid) {
-          targetUuid = matchedUuid;
-        } else {
-          // EEG（和按需的PPG）强制订阅
-          const isEssential = ['0013', '0014', '0015', '0016', '0010', '0011'].includes(channelId);
-          if (!isEssential) {
-            addLog(`⏭️ 跳过不可用且非必要通道: ${channelId}`);
-            continue;
+          try {
+            addLog(`🔍 订阅[${chId}] UUID=${nativeUuid}`);
+            let cbCount = 0;
+            device.monitorCharacteristicForService(MUSE_SERVICE, nativeUuid, (error, char) => {
+              cbCount++;
+              if (cbCount <= 3 || cbCount % 200 === 0) {
+                addLog(`📡 [${chId}] #${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
+              }
+              if (error) { addLog(`⚠️ [${chId}]: ${error.message}`); return; }
+              if (char?.value) handleMuseDataPacket(chId, char.value);
+            });
+            subscribedCount++;
+            await sleep(800);
+          } catch (e) {
+            addLog(`❌ 订阅失败 [${chId}]: ${e}`);
           }
         }
-
-        try {
-          addLog(`🔍 订阅: ${channelId} (${targetUuid})`);
-          let cbCount = 0;
-          device.monitorCharacteristicForService(MUSE_SERVICE, targetUuid, (error, char) => {
-            cbCount++;
-
-            if (cbCount <= 3 || cbCount % 100 === 0) {
-              addLog(`📡 [${channelId}] 回调#${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
-            }
-
-            if (error) {
-              addLog(`⚠️ 通道异常 [${channelId}]: ${error.message}`);
-              return;
-            }
-
-            if (char?.value) {
-              handleMuseDataPacket(channelId, char.value);
-            } else if (cbCount <= 5) {
-              addLog(`⚠️ [${channelId}] 空数据包`);
-            }
-          });
-          subscribedCount++;
-
-          // 强制沉睡延迟极度增加！给底层 Android GATT 队列充分的缓冲时间
-          // 避免瞬间的批量订阅导致部分通道的 Notification 特征开启失败
-          await sleep(1000);
-        } catch (e) {
-          addLog(`❌ 订阅失败 [${channelId}]: ${e}`);
+      } else {
+        // 方案B：备用-用硬编码UUID
+        addLog(`⚠️ 未发现服务特征，使用硬编码UUID订阅...`);
+        for (const uuid of ATHENA_CHANNELS) {
+          const chId = uuid.substring(4, 8);
+          try {
+            addLog(`🔍 订阅[${chId}] UUID=${uuid}`);
+            let cbCount = 0;
+            device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
+              cbCount++;
+              if (cbCount <= 3 || cbCount % 200 === 0) {
+                addLog(`📡 [${chId}] #${cbCount} err:${error ? 'Y' : 'N'} data:${char?.value ? 'Y' : 'N'}`);
+              }
+              if (error) { addLog(`⚠️ [${chId}]: ${error.message}`); return; }
+              if (char?.value) handleMuseDataPacket(chId, char.value);
+            });
+            subscribedCount++;
+            await sleep(800);
+          } catch (e) {
+            addLog(`❌ 订阅失败 [${chId}]: ${e}`);
+          }
         }
       }
 
-      addLog(`📡 已订阅 ${subscribedCount}/${subscribeChannels.length} 个通道`);
+      addLog(`📡 已订阅 ${subscribedCount} 个通道`);
 
       // dc001 × 2（必须发两次才能启动数据流）
       await write(device, CMD_START);
