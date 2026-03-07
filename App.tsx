@@ -17,7 +17,7 @@ import * as Sharing from 'expo-sharing';
 import Zip from 'react-native-zip-archive';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { decodeEEG, analyzeFrequency } from './utils/MuseDecoder';
+import { decodeEEG, analyzeFrequency, calculateSignalQuality } from './utils/MuseDecoder';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
 
@@ -191,6 +191,10 @@ export default function App() {
   const saveRowCount = useRef<number>(0);           // 保存的行数
   const horseshoeScore = useRef<number>(0);         // 最新佩戴质量分
   const diagnosticTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dataQualityTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const eegBufRef = useRef<Record<string, number[]>>({
+    '0013': [], '0014': [], '0015': [], '0016': []
+  });
 
   // 导入解码器，已在顶部导入
 
@@ -276,10 +280,54 @@ export default function App() {
       }
     }, 5000);
 
+    // ── 基于真实波形的信号质量分析（每 2 秒计算一次） ───────────────
+    dataQualityTimer.current = setInterval(() => {
+      if (lastDataTime.current === 0) return;
+
+      const qs: number[] = [];
+      const chMap: Record<string, string> = {
+        '0013': 'TP9', '0014': 'AF7', '0015': 'AF8', '0016': 'TP10'
+      };
+
+      setElectrodeQuality(prev => {
+        let changed = false;
+        const next = { ...prev };
+
+        for (const [chId, buf] of Object.entries(eegBufRef.current)) {
+          if (buf.length >= 64) {
+            // 获取软件分析出的分数
+            const softQ = calculateSignalQuality(buf);
+            const name = chMap[chId];
+
+            // 策略：取硬件贴合度与软件波形质量的最小值，确保评分严谨
+            // 如果硬件说完美但波形全是杂讯，则以波形为准；反之亦然。
+            const finalQ = name ? Math.min(next[name], softQ) : softQ;
+            qs.push(finalQ);
+
+            if (name && next[name] !== finalQ) {
+              next[name] = finalQ;
+              changed = true;
+            }
+          }
+        }
+
+        if (qs.length > 0) {
+          qs.sort((a, b) => a - b);
+          const mid = qs[Math.floor(qs.length / 2)];
+          horseshoeScore.current = mid;
+          recalcSignal(); // 立即触发 UI 刷新
+        }
+
+        return changed ? next : prev;
+      });
+
+    }, 2000);
+
     return () => {
       if (heartbeat.current) clearInterval(heartbeat.current);
       if (samplingTimer.current) clearTimeout(samplingTimer.current);
       if (diagnosticTimer.current) clearInterval(diagnosticTimer.current);
+      if (dataQualityTimer.current) clearInterval(dataQualityTimer.current);
       appStateSub.remove();
     };
   }, []);
@@ -462,6 +510,15 @@ export default function App() {
         }
 
         if (samples.length > 0) {
+          // 维护缓冲（保留最新 256 点 = 1 秒用作信号分析）
+          const buf = eegBufRef.current[channel];
+          if (buf) {
+            buf.push(...samples);
+            if (buf.length > 256) {
+              buf.splice(0, buf.length - 256);
+            }
+          }
+
           processThetaWave(samples);
           // 频域分析
           const { theta, alpha } = analyzeFrequency(samples);
@@ -755,29 +812,39 @@ export default function App() {
           ctrlBuf = ctrlBuf.replace(/"bp"\s*:\s*[\d.]+/, '');
         }
 
-        // 解析佩戴质量 - 兼容 Muse 2 ("hs") 和 Muse S ("ch")
-        // Muse S 会返回 "ch": [4.0, 4.0, 4.0, 4.0, 0.0, 0.0] 类的变长数组
+        // 解析硬件佩戴检测 (Horseshoe) - 修复被误删的“佩戴相关”硬逻辑
+        // 兼容 Muse 2 ("hs") 和 Muse S ("ch")
         let arrMatch = ctrlBuf.match(/"(?:hs|ch)"\s*:\s*\[([\d.\s,]+)\]/);
         if (arrMatch) {
           const valuesStr = arrMatch[1];
-          // 拆分出所有的数值
           const values = valuesStr.split(',')
             .map(v => parseFloat(v.trim()))
             .filter(v => !isNaN(v));
 
           if (values.length >= 4) {
-            // 只取前 4 个脑电极：TP9, AF7, AF8, TP10
-            const [tp9, af7, af8, tp10] = values.slice(0, 4).map(vFloat => {
+            // 获取 TP9, AF7, AF8, TP10 的硬件佩戴值
+            // 硬件值：1=Good(100%), 2=OK(50%), 4=Poor(0%)
+            const hardwareScores = values.slice(0, 4).map(vFloat => {
               const vInt = Math.round(vFloat);
-              // Muse horseshoe 值：1=佩戴良好, 2=一般, 3及以上=差
               return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
             });
-            setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
-            const avg = (tp9 + af7 + af8 + tp10) / 4;
-            updateSignal(avg);
-            addLog(`👤 佩戴质量 - TP9:${tp9}% AF7:${af7}% AF8:${af8}% TP10:${tp10}%`);
+
+            setElectrodeQuality(prev => {
+              const next = {
+                TP9: hardwareScores[0],
+                AF7: hardwareScores[1],
+                AF8: hardwareScores[2],
+                TP10: hardwareScores[3]
+              };
+              // 计算硬件评分的中位数作为基础参考分
+              const sorted = [...hardwareScores].sort((a, b) => a - b);
+              horseshoeScore.current = sorted[Math.floor(sorted.length / 2)];
+              recalcSignal();
+              return next;
+            });
+
+            addLog(`👤 硬件佩戴 - TP9:${hardwareScores[0]}% AF7:${hardwareScores[1]}% AF8:${hardwareScores[2]}% TP10:${hardwareScores[3]}%`);
           }
-          // 彻底清除处理过的数据段
           ctrlBuf = ctrlBuf.replace(/"(?:hs|ch)"\s*:\s*\[[\d.\s,]+\]/, '');
         }
 
