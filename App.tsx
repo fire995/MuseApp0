@@ -280,16 +280,29 @@ export default function App() {
     
     try {
       // @ts-ignore
-      await FileSystem.writeAsStringAsync(logFileUri.current, chunk, {
+      const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
+      
+      if (!fileInfo.exists) {
+        // 首写必须禁用 append，并注入 CSV Header
         // @ts-ignore
-        encoding: FileSystem.EncodingType.UTF8,
-        append: true,
-      });
+        await FileSystem.writeAsStringAsync(logFileUri.current, 'timestamp,channel,data\n' + chunk, {
+          // @ts-ignore
+          encoding: FileSystem.EncodingType.UTF8,
+        });
+      } else {
+        // 后续采用追加模式
+        // @ts-ignore
+        await FileSystem.writeAsStringAsync(logFileUri.current, chunk, {
+          // @ts-ignore
+          encoding: FileSystem.EncodingType.UTF8,
+          append: true,
+        });
+      }
 
       // @ts-ignore
-      const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
+      const newFileInfo = await FileSystem.getInfoAsync(logFileUri.current);
       // @ts-ignore
-      if (fileInfo.exists && fileInfo.size && fileInfo.size > 10 * 1024 * 1024) { // 10MB 切片
+      if (newFileInfo.exists && newFileInfo.size && newFileInfo.size > 10 * 1024 * 1024) { // 10MB 切片
         filePartIndex.current += 1;
         sessionStartTime.current = Date.now();
         await createNewLogFile();
@@ -588,8 +601,8 @@ export default function App() {
           ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
         }
 
-        // 解析佩戴质量 (Horseshoe) - 改进正则，支持无空格格式
-        const hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[([124]),([124]),([124]),([124])\]/);
+        // 解析佩戴质量 (Horseshoe) - 放宽正则，适应不同固件版本的 JSON 序列化差异
+        const hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
         if (hsMatch) {
           const [tp9, af7, af8, tp10] = hsMatch.slice(1).map(v => {
             const vInt = parseInt(v);
@@ -598,8 +611,8 @@ export default function App() {
           setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
           const avg = (tp9 + af7 + af8 + tp10) / 4;
           updateSignal(avg);
-          // 使用正则替换掉匹配到的内容
-          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[[124],[124],[124],[124]\]/, '');
+          // 彻底清除处理过的数据段
+          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {

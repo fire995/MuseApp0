@@ -11,8 +11,9 @@ export function decodeEEG(base64Data: string): number[] {
     const buffer = Buffer.from(base64Data, 'base64');
     const samples: number[] = [];
     
-    // Muse 数据格式：每 3 字节编码 2 个 12-bit 样本
-    for (let i = 0; i < buffer.length - 2; i += 3) {
+    // Muse BLE 数据协议规范：头 2 个字节为 Packet Sequence Number。
+    // EEG 数据载荷强制从 index 2 开始进行 12-bit 拆解。
+    for (let i = 2; i < buffer.length - 2; i += 3) {
       const byte1 = buffer[i];
       const byte2 = buffer[i + 1];
       const byte3 = buffer[i + 2];
