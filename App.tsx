@@ -861,8 +861,14 @@ export default function App() {
         }
 
         // 解析硬件佩戴检测 (Horseshoe / Impedance)
-        // 使用非常严格的正则（向 信号参考.py 完全看齐）
-        let arrMatch = ctrlBuf.match(/"(?:hs|ch|hn)"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+        // 你的【架构决策】：基于 muse-js 架构的硬件级 Horseshoe 遥测状态提取
+        let arrMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+
+        // 当某些版本的固件使用 hn 时也予以兼容捕获
+        if (!arrMatch) {
+          arrMatch = ctrlBuf.match(/"hn"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+        }
+
         if (arrMatch) {
           const v1 = parseInt(arrMatch[1], 10);
           const v2 = parseInt(arrMatch[2], 10);
@@ -876,7 +882,7 @@ export default function App() {
           recalcTotalSignal();
 
           addLog(`👤 硬件状态更新 TP9:${v1} AF7:${v2} AF8:${v3} TP10:${v4}`);
-          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[\s\d,]+\]/, '');
+          ctrlBuf = ''; // 匹配成功后直接安全清空累积缓冲，防残留
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
