@@ -166,6 +166,7 @@ export default function App() {
   const isSavingRef = useRef(false);
   useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
   const [savePath, setSavePath] = useState('');
+  const [saveDuration, setSaveDuration] = useState(0); // 采集时长(秒)
   const [denseMins, setDenseMins] = useState(30);
 
   // 日志
@@ -189,7 +190,8 @@ export default function App() {
   const dataFlowActive = useRef<boolean>(false);    // 数据流是否已激活
   const packetCountRef = useRef<number>(0);         // 总数据包计数（不触发UI）
   const saveRowCount = useRef<number>(0);           // 保存的行数
-  const horseshoeScore = useRef<number>(0);         // 最新佩戴质量分
+  const horseshoeScore = useRef<number>(50);         // 最新佩戴质量分 (默认50，防止初始为0锁死)
+  const hardwareQualityRef = useRef<Record<string, number>>({ TP9: 50, AF7: 50, AF8: 50, TP10: 50 }); // 各通道硬件独立分
   const diagnosticTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const dataQualityTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const eegBufRef = useRef<Record<string, number[]>>({
@@ -197,6 +199,7 @@ export default function App() {
   });
   const lastSaveTime = useRef<number>(0);            // 上次写入TXT的时间，用于0.5秒节流
   const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null); // 防闪退定时刷盘
+  const saveDurationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null); // UI计时器
 
   // 导入解码器，已在顶部导入
 
@@ -298,16 +301,17 @@ export default function App() {
         for (const [chId, buf] of Object.entries(eegBufRef.current)) {
           if (buf.length >= 64) {
             // 获取软件分析出的分数
-            const softQ = calculateSignalQuality(buf);
+            const raw_q = calculateSignalQuality(buf);
             const name = chMap[chId];
 
-            // 策略：取硬件贴合度与软件波形质量的最小值，确保评分严谨
-            // 如果硬件说完美但波形全是杂讯，则以波形为准；反之亦然。
-            const finalQ = name ? Math.min(next[name], softQ) : softQ;
-            qs.push(finalQ);
+            // 策略：Python原版融合算法 => 硬件 40%，软件 60%
+            // 如果硬件说完全没贴合(0)，则强制为0
+            const hn_q = name ? hardwareQualityRef.current[name] : 50;
+            const combined_q = hn_q > 0 ? Math.round(hn_q * 0.4 + raw_q * 0.6) : 0;
+            qs.push(combined_q);
 
-            if (name && next[name] !== finalQ) {
-              next[name] = finalQ;
+            if (name && next[name] !== combined_q) {
+              next[name] = combined_q;
               changed = true;
             }
           }
@@ -602,6 +606,13 @@ export default function App() {
         return;
       }
 
+      // 启动UI计时器
+      setSaveDuration(0);
+      if (saveDurationTimerRef.current) clearInterval(saveDurationTimerRef.current);
+      saveDurationTimerRef.current = setInterval(() => {
+        setSaveDuration(prev => prev + 1);
+      }, 1000);
+
       // 启动前台服务和CPU唤醒锁
       startForegroundCapture();
 
@@ -618,6 +629,10 @@ export default function App() {
       if (autoSaveTimerRef.current) {
         clearInterval(autoSaveTimerRef.current);
         autoSaveTimerRef.current = null;
+      }
+      if (saveDurationTimerRef.current) {
+        clearInterval(saveDurationTimerRef.current);
+        saveDurationTimerRef.current = null;
       }
       // 确保最后的缓冲区内容被写入
       await flushBufferToFile();
@@ -709,10 +724,10 @@ export default function App() {
 
       // @ts-ignore
       const files = await FileSystem.readDirectoryAsync(documentDir);
-      // 匹配所有数据文件：.csv 和 .txt
+      // 匹配所有数据文件：强制只过滤 .txt（屏蔽遗留空 csv 被误导出）
       const dataFiles = files.filter(f =>
         (f.startsWith('muse_log_') || f.startsWith('muse_data_')) &&
-        (f.endsWith('.csv') || f.endsWith('.txt'))
+        f.endsWith('.txt')
       );
 
       if (dataFiles.length === 0) {
@@ -865,18 +880,19 @@ export default function App() {
               return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
             });
 
-            setElectrodeQuality(prev => {
-              const next = {
-                TP9: hardwareScores[0],
-                AF7: hardwareScores[1],
-                AF8: hardwareScores[2],
-                TP10: hardwareScores[3]
-              };
-              const sorted = [...hardwareScores].sort((a, b) => a - b);
-              horseshoeScore.current = sorted[Math.floor(sorted.length / 2)];
-              recalcSignal();
-              return next;
-            });
+            // 更新硬件参考池
+            hardwareQualityRef.current = {
+              TP9: hardwareScores[0],
+              AF7: hardwareScores[1],
+              AF8: hardwareScores[2],
+              TP10: hardwareScores[3]
+            };
+
+            // 注意：因为 dataQualityTimer 每 2 秒会自动执行硬+软融合
+            // 这里为了 UI 立刻更新，我们可以触发一个计算但不全量替换
+            const sorted = [...hardwareScores].sort((a, b) => a - b);
+            horseshoeScore.current = sorted[Math.floor(sorted.length / 2)];
+            recalcSignal();
 
             addLog(`👤 佩戴 - TP9:${hardwareScores[0]}% AF7:${hardwareScores[1]}% AF8:${hardwareScores[2]}% TP10:${hardwareScores[3]}%`);
           }
@@ -1234,6 +1250,12 @@ export default function App() {
           onPress={toggleSave}>
           <Text style={s.btnText}>{isSaving ? '⏹ 停止保存' : '💾 开始采集'}</Text>
         </TouchableOpacity>
+
+        {isSaving ? (
+          <Text style={{ textAlign: 'center', color: '#EAEAEA', fontSize: 13, marginBottom: 10 }}>
+            ⏳ 已采集: {Math.floor(saveDuration / 60).toString().padStart(2, '0')} 分 {(saveDuration % 60).toString().padStart(2, '0')} 秒
+          </Text>
+        ) : null}
 
         {isSaving && savePath ? (
           <Text style={s.savePath}>📂 {savePath}</Text>
