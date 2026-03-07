@@ -358,8 +358,8 @@ export default function App() {
     }
 
     // 2. 实时解码和显示（始终运行）
-    // 0004 (AF7) 与 0005 (AF8) 是前额叶电极，对 Theta 冥想波形最为敏感
-    if (channel === '0004' || channel === '0005') {
+    // 0014 (AF7) 与 0015 (AF8) 是前额叶电极，对 Theta 冥想波形最为敏感
+    if (channel === '0013' || channel === '0014' || channel === '0015' || channel === '0016') {
       try {
         const samples = decodeEEG(base64Data);
         if (samples.length > 0) {
@@ -371,7 +371,7 @@ export default function App() {
           setPacketsRx(prev => prev + 1);
         }
       } catch (e) {
-        console.warn(`[${channel}] 解码失败:`, e);
+        addLog(`❌ [${channel}] 解码失败: ${e}`);
       }
     }
   };
