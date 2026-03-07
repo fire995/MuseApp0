@@ -76,6 +76,11 @@ const ThetaWave = React.memo(({ data }: { data: number[] }) => {
   const W = SCREEN_W - 32, H = 64, pad = 6;
   const pts = data.slice(-60);
 
+  // 调试：记录组件接收到的数据
+  if (data.length > 0 && data.length % 10 === 0) {
+    console.log(`🎨 ThetaWave 组件: 收到 ${data.length} 个数据点，最近 60 个: ${pts.length} 个`);
+  }
+
   if (pts.length < 2 || pts.every(v => v === 0)) {
     return (
       <View style={[s.waveBox, { height: H, justifyContent: 'center', alignItems: 'center' }]}>
@@ -315,12 +320,19 @@ export default function App() {
 
   // 定义一个简单的 4-8Hz 带通近似逻辑（或直接显示滤波后的原始波形）
   const processThetaWave = (rawSamples: number[]) => {
-    if (rawSamples.length === 0) return;
+    if (rawSamples.length === 0) {
+      addLog(`⚠️ processThetaWave: 收到空样本`);
+      return;
+    }
+    
+    addLog(`📈 processThetaWave: 处理 ${rawSamples.length} 个样本，值范围: [${Math.min(...rawSamples).toFixed(2)}, ${Math.max(...rawSamples).toFixed(2)}]`);
     
     // 使用所有样本点，而不是只取第一个
     setThetaWave(prev => {
       const newData = [...prev, ...rawSamples];
-      return newData.slice(-120); // 保留最近 120 个点
+      const sliced = newData.slice(-120); // 保留最近 120 个点
+      addLog(`📊 波形缓冲区更新: 总长度=${sliced.length}`);
+      return sliced;
     });
   };
 
@@ -342,6 +354,9 @@ export default function App() {
   };
 
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
+    // 调试：打印所有接收到的数据
+    addLog(`📦 [${channel}] 收到数据: ${base64Data.substring(0, 30)}... (${base64Data.length}字节)`);
+    
     // 1. 保存原始数据（仅在采集时）
     if (isSavingRef.current && logFileUri.current) {
       const timestamp = new Date().toISOString();
@@ -357,6 +372,7 @@ export default function App() {
     if (channel === '0004' || channel === '0005') {
       try {
         const samples = decodeEEG(base64Data);
+        addLog(`✅ [${channel}] 解码成功: ${samples.length}个样本`);
         if (samples.length > 0) {
           processThetaWave(samples);
           // 频域分析
@@ -366,7 +382,7 @@ export default function App() {
           setPacketsRx(prev => prev + 1);
         }
       } catch (e) {
-        console.warn('数据处理失败:', e);
+        addLog(`❌ [${channel}] 解码失败: ${e}`);
       }
     }
   };
@@ -589,16 +605,27 @@ export default function App() {
       let cmdResolve: (() => void) | null = null;
       let ctrlBuf = '';
 
-      device.monitorCharacteristicForService(MUSE_SERVICE, MUSE_CONTROL, (_, char) => {
-        if (!char?.value) return;
+      device.monitorCharacteristicForService(MUSE_SERVICE, MUSE_CONTROL, (error, char) => {
+        if (error) {
+          addLog(`⚠️ Control 通道错误: ${error.message}`);
+          return;
+        }
+        if (!char?.value) {
+          addLog(`⚠️ Control 通道收到空值`);
+          return;
+        }
 
+        addLog(`📡 Control 通道收到数据: ${char.value.substring(0, 50)}...`);
         const txt = Buffer.from(char.value, 'base64').toString();
+        addLog(`📝 解码后: ${txt.substring(0, 100)}`);
         ctrlBuf += txt;
 
         // 解析电池
         const bpMatch = ctrlBuf.match(/"bp"\s*:\s*(\d+)/);
         if (bpMatch) {
-          setBattery(parseInt(bpMatch[1]));
+          const batteryVal = parseInt(bpMatch[1]);
+          addLog(`🔋 电池: ${batteryVal}%`);
+          setBattery(batteryVal);
           ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
         }
 
@@ -609,6 +636,7 @@ export default function App() {
             const vInt = parseInt(v);
             return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
           });
+          addLog(`👤 佩戴质量 - TP9:${tp9}% AF7:${af7}% AF8:${af8}% TP10:${tp10}%`);
           setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
           const avg = (tp9 + af7 + af8 + tp10) / 4;
           updateSignal(avg);
@@ -617,6 +645,7 @@ export default function App() {
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
+          addLog(`✅ 命令确认收到`);
           cmdResolve(); cmdResolve = null;
           ctrlBuf = ctrlBuf.replace(/"rc":0/, '');
         }
@@ -656,6 +685,9 @@ export default function App() {
       }
 
       addLog('🛡️ 订阅 EEG + PPG 通道…');
+      addLog(`📋 ATHENA_CHANNELS: ${ATHENA_CHANNELS.join(', ')}`);
+      addLog(`📋 PPG_CHANNELS: ${PPG_CHANNELS.join(', ')}`);
+      
       const allChannels = [...ATHENA_CHANNELS, ...PPG_CHANNELS];
       let subscribedCount = 0;
 
@@ -663,28 +695,31 @@ export default function App() {
         const uuidLower = uuid.toLowerCase();
         const channelId = uuid.substring(4, 8);
         
+        addLog(`🔍 尝试订阅通道: ${channelId} (UUID: ${uuid})`);
+        
         // 如果有可用 UUID 列表，检查该通道是否存在
         if (availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
-          console.warn(`⏭️ 跳过不可用通道: ${channelId}`);
+          addLog(`⏭️ 跳过不可用通道: ${channelId}`);
           continue;
         }
 
         try {
           device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
             if (error) {
-              console.warn(`⚠️ 通道订阅异常 [${channelId}]: ${error.message}`);
+              addLog(`⚠️ 通道订阅异常 [${channelId}]: ${error.message}`);
               return;
             }
             if (char?.value) {
               // 调试日志：确认数据流
-              console.log(`📊 [${channelId}] 收到数据包，长度=${char.value.length}`);
+              addLog(`📊 [${channelId}] 收到数据包，长度=${char.value.length}`);
               // 始终将数据分发到处理管线，内部判断是否保存
               handleMuseDataPacket(channelId, char.value);
             }
           });
           subscribedCount++;
+          addLog(`✅ 成功订阅: ${channelId}`);
         } catch (e) {
-          console.warn(`❌ 订阅失败 [${channelId}]: ${e}`);
+          addLog(`❌ 订阅失败 [${channelId}]: ${e}`);
         }
       }
 
