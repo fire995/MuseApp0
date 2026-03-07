@@ -697,13 +697,22 @@ export default function App() {
 
         try {
           device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
+            // 🔴 诊断日志：打印回调触发情况
+            addLog(`🔴 [${channelId}] 回调触发 - error: ${error ? 'YES' : 'NO'}, char: ${char ? 'YES' : 'NO'}`);
+            
             if (error) {
               addLog(`⚠️ 通道订阅异常 [${channelId}]: ${error.message}`);
               return;
             }
+            
             if (char?.value) {
+              // 🔴 诊断日志：打印原始 Base64 数据
+              addLog(`📊 [${channelId}] 原始数据: ${char.value.substring(0, 50)}... (长度=${char.value.length})`);
               // 始终将数据分发到处理管线，内部判断是否保存
               handleMuseDataPacket(channelId, char.value);
+            } else {
+              // 🔴 诊断日志：记录空数据包
+              addLog(`⚠️ [${channelId}] 收到空数据包`);
             }
           });
           subscribedCount++;
