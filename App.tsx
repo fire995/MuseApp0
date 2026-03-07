@@ -467,16 +467,14 @@ export default function App() {
 
     // 1. 全量保存原始数据（TXT 格式）：不再经过 0.5s 节流，保存所有的 EEG 包
     if (isSavingRef.current && logFileUri.current) {
-      // 取当前通道硬件状态和系统总分
-      const hwObj = hardwareRawRef.current;
-      const hwStr = `${hwObj.TP9},${hwObj.AF7},${hwObj.AF8},${hwObj.TP10}`;
+      // 获取系统总分
       const sig = signalBuf.current.length > 0
         ? signalBuf.current[signalBuf.current.length - 1]
         : 0;
 
-      // 写入全部完整数据
+      // 写入全部完整数据 (移除了硬件状态 hw，因为它对当前固件不准且不再需要)
       const timestamp = new Date().toISOString();
-      const line = `${timestamp} | ch=${channel} | sig=${sig} | hw=[${hwStr}] | ${base64Data}\n`;
+      const line = `${timestamp} | ch=${channel} | sig=${sig} | ${base64Data}\n`;
       fileBuffer.current += line;
       saveRowCount.current += 1;
 
