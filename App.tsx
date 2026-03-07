@@ -654,6 +654,8 @@ export default function App() {
         setOnlyAlertOnce: "true",
         color: '#000000',
         visibility: 'public',
+        // @ts-ignore - rn-foreground-service requires ServiceType for Android 14+ but types may lack it
+        ServiceType: 'connectedDevice',
       });
 
       // 2. 注入 Partial Wake Lock 锁死 CPU 运行态
