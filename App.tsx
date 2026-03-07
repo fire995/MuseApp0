@@ -33,7 +33,7 @@ const SCREEN_W   = Dimensions.get('window').width - 40;
 
 const MUSE_SERVICE    = '0000fe8d-0000-1000-8000-00805f9b34fb';
 const MUSE_CONTROL    = '273e0001-4c4d-454d-96be-f03bac821358';
-const ATHENA_CHANNELS = ['273e0003','273e0004','273e0005','273e0006','273e0007']
+const ATHENA_CHANNELS = ['273e0013','273e0014','273e0015','273e0016']
   .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
 const PPG_CHANNELS    = ['273e0010','273e0011']
   .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
