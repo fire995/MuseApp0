@@ -195,6 +195,7 @@ export default function App() {
   const eegBufRef = useRef<Record<string, number[]>>({
     '0013': [], '0014': [], '0015': [], '0016': []
   });
+  const lastSaveTime = useRef<number>(0);            // 上次写入TXT的时间，用于0.5秒节流
 
   // 导入解码器，已在顶部导入
 
@@ -344,7 +345,7 @@ export default function App() {
       const SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000;
 
       for (const file of files) {
-        if (file.endsWith('.csv') || file.endsWith('.zip')) {
+        if (file.endsWith('.csv') || file.endsWith('.zip') || file.endsWith('.txt')) {
           const fileUri = file.startsWith('file://') ? file : dirUri + file;
           // @ts-ignore
           const fileInfo = await FileSystem.getInfoAsync(fileUri);
@@ -387,11 +388,9 @@ export default function App() {
     addLog(`📁 文件系统已初始化`);
   };
 
+  // ── 极简 TXT 写入（每次直接追加，不读旧文件） ─────────────────────
   const flushBufferToFile = async () => {
     if (!logFileUri.current || fileBuffer.current.length === 0) {
-      if (isSavingRef.current && !logFileUri.current) {
-        addLog('🔴 [FLUSH] 文件URI为空！无法写入');
-      }
       return;
     }
 
@@ -400,35 +399,35 @@ export default function App() {
     fileBuffer.current = '';
 
     try {
+      // 直接用 writeAsStringAsync 写入，不做 read-concat
       // @ts-ignore
       const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
-
       if (!fileInfo.exists) {
-        addLog(`📝 [FLUSH] 创建新文件并写入 ${chunkLines} 行`);
+        // 文件不存在，创建并写入
         // @ts-ignore
-        await FileSystem.writeAsStringAsync(logFileUri.current, 'timestamp,channel,data\n' + chunk, {
+        await FileSystem.writeAsStringAsync(logFileUri.current, chunk, {
           // @ts-ignore
-          encoding: FileSystem.EncodingType.UTF8,
+          encoding: FileSystem.EncodingType.UTF8
         });
       } else {
-        // Expo FileSystem append 机制在旧版本有坑（会覆盖全文件），所以此处手动追加
+        // 文件存在，读取现有内容并拼接（兼容所有版本的 expo-file-system）
         // @ts-ignore
-        const existingData = await FileSystem.readAsStringAsync(logFileUri.current, { encoding: FileSystem.EncodingType.UTF8 });
+        const existing = await FileSystem.readAsStringAsync(logFileUri.current, { encoding: FileSystem.EncodingType.UTF8 });
         // @ts-ignore
-        await FileSystem.writeAsStringAsync(logFileUri.current, existingData + chunk, {
+        await FileSystem.writeAsStringAsync(logFileUri.current, existing + chunk, {
           // @ts-ignore
-          encoding: FileSystem.EncodingType.UTF8,
+          encoding: FileSystem.EncodingType.UTF8
         });
       }
 
       // @ts-ignore
-      const newFileInfo = await FileSystem.getInfoAsync(logFileUri.current);
-      const sizeKB = newFileInfo.exists && newFileInfo.size ? (newFileInfo.size / 1024).toFixed(1) : 0;
-      addLog(`✅ [FLUSH] 追加 ${chunkLines} 行，当前文件大小: ${sizeKB}KB`);
+      const newInfo = await FileSystem.getInfoAsync(logFileUri.current);
+      const sizeKB = newInfo.exists && newInfo.size ? (newInfo.size / 1024).toFixed(1) : '?';
+      addLog(`✅ [FLUSH] 写入 ${chunkLines} 行，文件大小: ${sizeKB}KB`);
 
     } catch (e) {
       addLog(`🔴 [FLUSH] 写入异常: ${e}`);
-      fileBuffer.current = chunk + fileBuffer.current; // 失败则回退缓冲区
+      fileBuffer.current = chunk + fileBuffer.current;
     }
   };
 
@@ -479,24 +478,31 @@ export default function App() {
       addLog(`📦 [${channel}] #${pktNum} (${base64Data.length}字节)`);
     }
 
-    // 1. 保存原始数据（仅在采集时）
+    // 1. 简化保存：每 0.5 秒写一行摘要到 TXT（不再保存每个原始包）
     if (isSavingRef.current && logFileUri.current) {
-      const timestamp = new Date().toISOString();
-      fileBuffer.current += `${timestamp},${channel},${base64Data}\n`;
-      saveRowCount.current += 1;
+      if (now - lastSaveTime.current >= 500) {
+        lastSaveTime.current = now;
+        const timestamp = new Date().toISOString();
+        // 取当前电极质量和信号分
+        const hs = horseshoeScore.current;
+        const sig = signalBuf.current.length > 0
+          ? signalBuf.current[signalBuf.current.length - 1]
+          : 0;
+        // 简化格式：时间 | 通道 | 信号分 | 佩戴分 | base64数据前64字符
+        const line = `${timestamp} | ch=${channel} | sig=${sig} | hs=${hs} | ${base64Data.substring(0, 64)}\n`;
+        fileBuffer.current += line;
+        saveRowCount.current += 1;
 
-      // 每写入第 1、10、100 行时输出诊断（确认保存管线畅通）
-      const rows = saveRowCount.current;
-      if (rows === 1 || rows === 10 || rows === 100 || rows % 500 === 0) {
-        addLog(`💾 [SAVE] 已缓存 ${rows} 行 | 缓冲区: ${fileBuffer.current.length}字节`);
-      }
+        const rows = saveRowCount.current;
+        if (rows === 1 || rows === 10 || rows === 50 || rows % 100 === 0) {
+          addLog(`💾 [SAVE] 已缓存 ${rows} 行 (0.5秒/行)`);
+        }
 
-      if (fileBuffer.current.length > 512 * 1024) { // 改为 500KB 刷盘一次，减少磁盘 IO 和读写重叠
-        flushBufferToFile();
+        // 缓冲区超过 50KB 就刷盘（TXT 行少很多，不会太大）
+        if (fileBuffer.current.length > 50 * 1024) {
+          flushBufferToFile();
+        }
       }
-    } else if (isSavingRef.current && !logFileUri.current && pktNum % 50 === 0) {
-      // 诊断：正在保存模式但文件URI为空
-      addLog(`🔴 [SAVE] 保存已开启但 logFileUri 为空！数据丢失中`);
     }
 
     // 2. 实时解码和显示（始终运行）
@@ -565,31 +571,32 @@ export default function App() {
     } catch { }
   };
 
-  // ── 保存控制 ─────────────────────────────────────────────────
+  // ── 保存控制（简化 TXT 版） ───────────────────────────────
   const toggleSave = async () => {
     if (!isSaving) {
       // 开始保存
       setIsSaving(true);
-      saveRowCount.current = 0; // 重置行计数器
-      addLog(`💾 开始保存数据`);
-      addLog(`💾 [SAVE] isSavingRef=${isSavingRef.current} → 即将设为 true`);
+      saveRowCount.current = 0;
+      lastSaveTime.current = 0;
+      fileBuffer.current = '';
 
-      // 创建带时间戳的数据文件并写入 CSV 头
+      // 创建简单的 TXT 文件
       try {
         const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
-        const fileName = `muse_data_${timeStr}.csv`;
+        const fileName = `muse_data_${timeStr}.txt`;
         // @ts-ignore
         const uri = `${FileSystem.documentDirectory}${fileName}`;
-        addLog(`💾 [SAVE] 准备创建文件: ${uri}`);
+
+        // 写入文件头
+        const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样间隔: 0.5秒\n格式: 时间 | 通道 | 信号分 | 佩戴分 | 数据\n${'='.repeat(60)}\n`;
         // @ts-ignore
-        await FileSystem.writeAsStringAsync(uri, 'timestamp,channel,data\n', { encoding: FileSystem.EncodingType.UTF8 });
+        await FileSystem.writeAsStringAsync(uri, header, { encoding: FileSystem.EncodingType.UTF8 });
         logFileUri.current = uri;
-        fileBuffer.current = ''; // 清空缓冲区，避免残留旧数据
         setSavePath(fileName);
-        addLog(`📁 数据文件已创建: ${fileName}`);
-        addLog(`💾 [SAVE] logFileUri 已设置, 数据包到达将自动写入`);
+        addLog(`💾 开始保存 → ${fileName}`);
+        addLog(`💾 每0.5秒记录一行摘要数据（TXT格式）`);
       } catch (e) {
-        addLog(`🔴 创建数据文件失败: ${e}`);
+        addLog(`🔴 创建文件失败: ${e}`);
         setIsSaving(false);
         return;
       }
@@ -688,9 +695,10 @@ export default function App() {
 
       // @ts-ignore
       const files = await FileSystem.readDirectoryAsync(documentDir);
-      // 匹配所有数据文件：muse_log_*.csv 和 muse_data_*.csv
+      // 匹配所有数据文件：.csv 和 .txt
       const dataFiles = files.filter(f =>
-        (f.startsWith('muse_log_') || f.startsWith('muse_data_')) && f.endsWith('.csv')
+        (f.startsWith('muse_log_') || f.startsWith('muse_data_')) &&
+        (f.endsWith('.csv') || f.endsWith('.txt'))
       );
 
       if (dataFiles.length === 0) {
@@ -812,9 +820,12 @@ export default function App() {
           ctrlBuf = ctrlBuf.replace(/"bp"\s*:\s*[\d.]+/, '');
         }
 
-        // 解析硬件佩戴检测 (Horseshoe) - 修复被误删的“佩戴相关”硬逻辑
-        // 兼容 Muse 2 ("hs") 和 Muse S ("ch")
-        let arrMatch = ctrlBuf.match(/"(?:hs|ch)"\s*:\s*\[([\d.\s,]+)\]/);
+        // 解析硬件佩戴检测 (Horseshoe / Impedance)
+        // 兼容三种键名：
+        //   Muse 2:       "hs":[1,2,1,4]     (horseshoe)
+        //   Muse S Gen1:  "ch":[4.0, 4.0, ...]  (channel quality)
+        //   Muse S Gen2:  "hn":[1,1,2,4]     (hardware impedance, 你的参考代码指明)
+        let arrMatch = ctrlBuf.match(/"(?:hs|ch|hn)"\s*:\s*\[([\d.\s,]+)\]/);
         if (arrMatch) {
           const valuesStr = arrMatch[1];
           const values = valuesStr.split(',')
@@ -836,16 +847,15 @@ export default function App() {
                 AF8: hardwareScores[2],
                 TP10: hardwareScores[3]
               };
-              // 计算硬件评分的中位数作为基础参考分
               const sorted = [...hardwareScores].sort((a, b) => a - b);
               horseshoeScore.current = sorted[Math.floor(sorted.length / 2)];
               recalcSignal();
               return next;
             });
 
-            addLog(`👤 硬件佩戴 - TP9:${hardwareScores[0]}% AF7:${hardwareScores[1]}% AF8:${hardwareScores[2]}% TP10:${hardwareScores[3]}%`);
+            addLog(`👤 佩戴 - TP9:${hardwareScores[0]}% AF7:${hardwareScores[1]}% AF8:${hardwareScores[2]}% TP10:${hardwareScores[3]}%`);
           }
-          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch)"\s*:\s*\[[\d.\s,]+\]/, '');
+          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[\d.\s,]+\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
