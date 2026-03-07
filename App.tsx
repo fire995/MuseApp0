@@ -353,8 +353,8 @@ export default function App() {
     }
 
     // 2. 实时解码和显示（始终运行）
-    // 273e0004 (AF7) 与 273e0005 (AF8) 是前额叶电极，对 Theta 冥想波形最为敏感
-    if (channel === '273e0004' || channel === '273e0005') {
+    // 0004 (AF7) 与 0005 (AF8) 是前额叶电极，对 Theta 冥想波形最为敏感
+    if (channel === '0004' || channel === '0005') {
       try {
         const samples = decodeEEG(base64Data);
         if (samples.length > 0) {
@@ -635,22 +635,60 @@ export default function App() {
       await sendCmd(CMD_PRESET_HI, 'preset p1035 高速模式');
       setSamplingMode('dense');
 
+      // 关键修复：增加等待时间让 BLE 栈完成服务发现
+      addLog('⏳ 等待 BLE 栈完成服务枚举…');
+      await sleep(1500);
+
+      // 验证 Characteristic 可用性
+      let availableUUIDs: string[] = [];
+      try {
+        const services = await device.services();
+        const museService = services.find(s => s.uuid.toLowerCase() === MUSE_SERVICE.toLowerCase());
+        if (museService) {
+          const chars = await museService.characteristics();
+          availableUUIDs = chars.map(c => c.uuid.toLowerCase());
+          addLog(`✅ 发现 ${chars.length} 个 Characteristic`);
+        } else {
+          addLog('⚠️ 未找到 Muse 服务，尝试直接订阅…');
+        }
+      } catch (e) {
+        addLog(`⚠️ 服务枚举失败: ${e}，尝试直接订阅…`);
+      }
+
       addLog('🛡️ 订阅 EEG + PPG 通道…');
-      [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
-        device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
-          if (error) {
-            addLog(`⚠️ 通道订阅异常 [${uuid.substring(4, 8)}]: ${error.message}`);
-            return;
-          }
-          if (char?.value) {
-            const channelId = uuid.substring(4, 8);
-            // 调试日志：确认数据流
-            console.log(`📊 [${channelId}] 收到数据包，长度=${char.value.length}`);
-            // 始终将数据分发到处理管线，内部判断是否保存
-            handleMuseDataPacket(channelId, char.value);
-          }
-        });
-      });
+      const allChannels = [...ATHENA_CHANNELS, ...PPG_CHANNELS];
+      let subscribedCount = 0;
+
+      for (const uuid of allChannels) {
+        const uuidLower = uuid.toLowerCase();
+        const channelId = uuid.substring(4, 8);
+        
+        // 如果有可用 UUID 列表，检查该通道是否存在
+        if (availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
+          console.warn(`⏭️ 跳过不可用通道: ${channelId}`);
+          continue;
+        }
+
+        try {
+          device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
+            if (error) {
+              console.warn(`⚠️ 通道订阅异常 [${channelId}]: ${error.message}`);
+              return;
+            }
+            if (char?.value) {
+              // 调试日志：确认数据流
+              console.log(`📊 [${channelId}] 收到数据包，长度=${char.value.length}`);
+              // 始终将数据分发到处理管线，内部判断是否保存
+              handleMuseDataPacket(channelId, char.value);
+            }
+          });
+          subscribedCount++;
+        } catch (e) {
+          console.warn(`❌ 订阅失败 [${channelId}]: ${e}`);
+        }
+      }
+
+      addLog(`📡 已订阅 ${subscribedCount}/${allChannels.length} 个通道`);
 
       // dc001 × 2（必须发两次才能启动数据流）
       await write(device, CMD_START);
