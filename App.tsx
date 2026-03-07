@@ -320,19 +320,12 @@ export default function App() {
 
   // 定义一个简单的 4-8Hz 带通近似逻辑（或直接显示滤波后的原始波形）
   const processThetaWave = (rawSamples: number[]) => {
-    if (rawSamples.length === 0) {
-      addLog(`⚠️ processThetaWave: 收到空样本`);
-      return;
-    }
-    
-    addLog(`📈 processThetaWave: 处理 ${rawSamples.length} 个样本，值范围: [${Math.min(...rawSamples).toFixed(2)}, ${Math.max(...rawSamples).toFixed(2)}]`);
+    if (rawSamples.length === 0) return;
     
     // 使用所有样本点，而不是只取第一个
     setThetaWave(prev => {
       const newData = [...prev, ...rawSamples];
-      const sliced = newData.slice(-120); // 保留最近 120 个点
-      addLog(`📊 波形缓冲区更新: 总长度=${sliced.length}`);
-      return sliced;
+      return newData.slice(-120); // 保留最近 120 个点
     });
   };
 
@@ -354,9 +347,6 @@ export default function App() {
   };
 
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
-    // 调试：打印所有接收到的数据
-    addLog(`📦 [${channel}] 收到数据: ${base64Data.substring(0, 30)}... (${base64Data.length}字节)`);
-    
     // 1. 保存原始数据（仅在采集时）
     if (isSavingRef.current && logFileUri.current) {
       const timestamp = new Date().toISOString();
@@ -372,7 +362,6 @@ export default function App() {
     if (channel === '0004' || channel === '0005') {
       try {
         const samples = decodeEEG(base64Data);
-        addLog(`✅ [${channel}] 解码成功: ${samples.length}个样本`);
         if (samples.length > 0) {
           processThetaWave(samples);
           // 频域分析
@@ -382,7 +371,7 @@ export default function App() {
           setPacketsRx(prev => prev + 1);
         }
       } catch (e) {
-        addLog(`❌ [${channel}] 解码失败: ${e}`);
+        console.warn(`[${channel}] 解码失败:`, e);
       }
     }
   };
@@ -629,19 +618,22 @@ export default function App() {
           ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
         }
 
-        // 解析佩戴质量 (Horseshoe) - 放宽正则，适应不同固件版本的 JSON 序列化差异
-        const hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+        // 解析佩戴质量 (Horseshoe) - 支持多种格式
+        let hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+        if (!hsMatch) {
+          // 尝试无空格版本
+          hsMatch = ctrlBuf.match(/"hs":\[(\d+),(\d+),(\d+),(\d+)\]/);
+        }
         if (hsMatch) {
           const [tp9, af7, af8, tp10] = hsMatch.slice(1).map(v => {
             const vInt = parseInt(v);
             return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
           });
-          addLog(`👤 佩戴质量 - TP9:${tp9}% AF7:${af7}% AF8:${af8}% TP10:${tp10}%`);
           setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
           const avg = (tp9 + af7 + af8 + tp10) / 4;
           updateSignal(avg);
           // 彻底清除处理过的数据段
-          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]/, '');
+          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[[\d\s,]+\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
@@ -710,8 +702,6 @@ export default function App() {
               return;
             }
             if (char?.value) {
-              // 调试日志：确认数据流
-              addLog(`📊 [${channelId}] 收到数据包，长度=${char.value.length}`);
               // 始终将数据分发到处理管线，内部判断是否保存
               handleMuseDataPacket(channelId, char.value);
             }
