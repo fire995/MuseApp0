@@ -33,7 +33,7 @@ const SCREEN_W   = Dimensions.get('window').width - 40;
 
 const MUSE_SERVICE    = '0000fe8d-0000-1000-8000-00805f9b34fb';
 const MUSE_CONTROL    = '273e0001-4c4d-454d-96be-f03bac821358';
-const ATHENA_CHANNELS = ['273e0013','273e0014','273e0015','273e0016','273e0017']
+const ATHENA_CHANNELS = ['273e0003','273e0004','273e0005','273e0006','273e0007']
   .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
 const PPG_CHANNELS    = ['273e0010','273e0011']
   .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
@@ -353,7 +353,8 @@ export default function App() {
     }
 
     // 2. 实时解码和显示（始终运行）
-    if (channel === '0014' || channel === '0015') {
+    // 0004 (AF7) 与 0005 (AF8) 是前额叶电极，对 Theta 冥想波形最为敏感
+    if (channel === '0004' || channel === '0005') {
       try {
         const samples = decodeEEG(base64Data);
         if (samples.length > 0) {
@@ -636,7 +637,11 @@ export default function App() {
 
       addLog('🛡️ 订阅 EEG + PPG 通道…');
       [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
-        device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (_, char) => {
+        device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
+          if (error) {
+            addLog(`⚠️ 通道订阅异常 [${uuid.substring(4, 8)}]: ${error.message}`);
+            return;
+          }
           if (char?.value) {
             // 始终将数据分发到处理管线，内部判断是否保存
             handleMuseDataPacket(uuid.substring(4, 8), char.value);
