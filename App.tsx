@@ -24,7 +24,7 @@ if (!global.Buffer) { global.Buffer = Buffer; }
 // 注册前台任务
 ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => { } } });
 
-const ENABLE_PPG_SUBSCRIBE = false; // 按需启停：目前隔离脱离光电波，保护JS桥物理带宽
+// [已清理] ENABLE_PPG_SUBSCRIBE 已移除 — 订阅逻辑直接遍历所有通道
 
 // ── 常量 ─────────────────────────────────────────────────────────
 const bleManager = new BleManager();
@@ -187,27 +187,20 @@ export default function App() {
   // 信号平滑（10 帧中位数，彻底消除跳变）
   const signalBuf = useRef<number[]>([]);
 
-  // ── 数据流追踪（用于双因子信号计算 + 诊断） ──────────────────────
-  const lastDataTime = useRef<number>(0);          // 最近一次收到数据包的时间
-  const dataFlowActive = useRef<boolean>(false);    // 数据流是否已激活
-  const packetCountRef = useRef<number>(0);         // 总数据包计数（不触发UI）
-  const saveRowCount = useRef<number>(0);           // 保存的行数
-  const horseshoeScore = useRef<number>(50);         // 兼容保留
-  // 硬件原生状态: 1=Good, 2=OK, 4=Bad (默认-1=未收到过)
-  const hardwareRawRef = useRef<Record<string, number>>({ TP9: -1, AF7: -1, AF8: -1, TP10: -1 });
-  const hardwareEverReceived = useRef<boolean>(false); // 是否曾经收到过硬件状态包
-  // 软件质量分析分 (0-100)
+  // ── 数据流追踪 ──────────────────────────────────────────────────
+  const lastDataTime = useRef<number>(0);
+  const dataFlowActive = useRef<boolean>(false);
+  const packetCountRef = useRef<number>(0);
+  const saveRowCount = useRef<number>(0);
+  // 软件质量分析分 (0-100, 基于频段能量比)
   const softwareRawRef = useRef<Record<string, number>>({ TP9: 0, AF7: 0, AF8: 0, TP10: 0 });
   const diagnosticTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const dataQualityTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const eegBufRef = useRef<Record<string, number[]>>({
     '0013': [], '0014': [], '0015': [], '0016': []
   });
-  const lastSaveTime = useRef<number>(0);            // 上次写入TXT的时间，用于0.5秒节流
-  const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null); // 防闪退定时刷盘
-  const saveDurationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null); // UI计时器
-
-  // 导入解码器，已在顶部导入
+  const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const saveDurationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const addLog = useCallback((msg: string) => {
     console.log(msg);
@@ -270,13 +263,11 @@ export default function App() {
       const bufLen = fileBuffer.current.length;
       const savedRows = saveRowCount.current;
       const fileUri = logFileUri.current;
-      const hwObj = hardwareRawRef.current;
-      const hwStr = `[${hwObj.TP9},${hwObj.AF7},${hwObj.AF8},${hwObj.TP10}]`;
 
       // 只在连接状态下输出诊断（避免未连接时刷屏）
       if (pktTotal > 0 || saving) {
         addLog(`── 诊断 ──`);
-        addLog(`📡 数据流: ${pktTotal}包 | 最后收到: ${timeSinceData}秒前 | 硬件原值: ${hwStr}`);
+        addLog(`📡 数据流: ${pktTotal}包 | 最后收到: ${timeSinceData}秒前`);
         if (saving) {
           addLog(`💾 保存: ${savedRows}行已写入 | 缓冲: ${bufLen}字节 | 文件: ${fileUri ? '✓' : '✗'}`);
         }
@@ -375,7 +366,9 @@ export default function App() {
     addLog(`📁 文件系统已初始化`);
   };
 
-  // ── 极简 TXT 写入（每次直接追加，不读旧文件） ─────────────────────
+  // ── 分片 TXT 写入（每片最大 5MB，避免 O(N²) 全文件读写）────────────
+  const MAX_PART_SIZE = 5 * 1024 * 1024; // 5MB
+
   const flushBufferToFile = async () => {
     if (!logFileUri.current || fileBuffer.current.length === 0) {
       return;
@@ -386,18 +379,28 @@ export default function App() {
     fileBuffer.current = '';
 
     try {
-      // 直接用 writeAsStringAsync 写入，不做 read-concat
+      // 检查当前文件大小，若超过 5MB 则自动切到下一个分片
       // @ts-ignore
       const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
-      if (!fileInfo.exists) {
-        // 文件不存在，创建并写入
+      if (fileInfo.exists && fileInfo.size && fileInfo.size > MAX_PART_SIZE) {
+        // 切换到新分片
+        filePartIndex.current += 1;
+        const baseName = logFileUri.current.replace(/_part\d+\.txt$/, '').replace(/\.txt$/, '');
+        const newUri = `${baseName}_part${filePartIndex.current}.txt`;
+        logFileUri.current = newUri;
+        addLog(`📂 [分片] 文件切到 part${filePartIndex.current}`);
+      }
+
+      if (!fileInfo.exists || (fileInfo.exists && fileInfo.size && fileInfo.size > MAX_PART_SIZE)) {
+        // 新文件：直接创建写入
         // @ts-ignore
         await FileSystem.writeAsStringAsync(logFileUri.current, chunk, {
           // @ts-ignore
           encoding: FileSystem.EncodingType.UTF8
         });
       } else {
-        // 文件存在，读取现有内容并拼接（兼容所有版本的 expo-file-system）
+        // 追加：读取现有内容 → 拼接（expo-file-system 不支持原生 append）
+        // 注意：由于 5MB 分片限制，单次读写量被严格控制在 5MB 以内
         // @ts-ignore
         const existing = await FileSystem.readAsStringAsync(logFileUri.current, { encoding: FileSystem.EncodingType.UTF8 });
         // @ts-ignore
@@ -410,7 +413,7 @@ export default function App() {
       // @ts-ignore
       const newInfo = await FileSystem.getInfoAsync(logFileUri.current);
       const sizeKB = newInfo.exists && newInfo.size ? (newInfo.size / 1024).toFixed(1) : '?';
-      addLog(`✅ [FLUSH] 写入 ${chunkLines} 行，文件大小: ${sizeKB}KB`);
+      addLog(`✅ [FLUSH] 写入 ${chunkLines} 行，文件: ${sizeKB}KB (part${filePartIndex.current})`);
 
     } catch (e) {
       addLog(`🔴 [FLUSH] 写入异常: ${e}`);
@@ -556,8 +559,8 @@ export default function App() {
       // 开始保存
       setIsSaving(true);
       saveRowCount.current = 0;
-      lastSaveTime.current = 0;
       fileBuffer.current = '';
+      filePartIndex.current = 1;
 
       // 创建简单的 TXT 文件
       try {
@@ -567,7 +570,7 @@ export default function App() {
         const uri = `${FileSystem.documentDirectory}${fileName}`;
 
         // 写入文件头
-        const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: 全量原始包\n格式: 时间 | 通道 | 信号分 | 佩戴分 | 完整12bit原流Base64数据\n${'='.repeat(60)}\n`;
+        const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: 全量原始包 (p1035模式, 256Hz, 所有通道混合在ch=0013)\n格式: 时间 | ch=通道 | sig=信号分(频段) | Base64原始数据\n${'='.repeat(60)}\n`;
         // @ts-ignore
         await FileSystem.writeAsStringAsync(uri, header, { encoding: FileSystem.EncodingType.UTF8 });
         logFileUri.current = uri;
@@ -810,19 +813,13 @@ export default function App() {
         }
 
         const txt = Buffer.from(char.value, 'base64').toString();
-        addLog(`📡 Control raw: ${txt.substring(0, 120)}`);
         ctrlBuf += txt;
-
-        // 【调试功能】把 Control 通道的原生字符串硬写入保存中！寻找真正的格式
-        if (isSavingRef.current && logFileUri.current) {
-          fileBuffer.current += `${new Date().toISOString()} | CONTROL_RAW | ${txt.replace(/\n/g, '')}\n`;
-        }
+        // Control 通道静默处理（不再刷屏日志，不再写入保存文件）
 
         // 【分包容错】检查 hs/ch/hn 数组是否闭合
         const hasOpenArray = /"(?:ch|hs|hn)"\s*:\s*\[[^\]]*$/.test(ctrlBuf);
         if (hasOpenArray) {
-          addLog(`⏳ 状态数组拼接中...等待闭合`);
-          return;
+          return; // 静默等待闭合
         }
 
         // 解析电池
@@ -833,36 +830,10 @@ export default function App() {
           setBattery(batteryVal);
         }
 
-        // 解析电极质量 (兼容不同的固件版本和 Preset)
-        // p21 会发出 "hs": [1, 2, 4, 1] 这种数组
-        // p1035 会不发出 hs 数组，可能发出 "ch": [0,0] 等
-        let hwValues: number[] | null = null;
-        let sensorKey = '';
-
-        const hsMatch = ctrlBuf.match(/"(?:hs|hn)"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+        // 解析电极质量（仅做日志记录，实际评分靠频段算法）
+        const hsMatch = ctrlBuf.match(/"(?:hs|hn|ch)"\s*:\s*\[([^\]]+)\]/);
         if (hsMatch) {
-          hwValues = [parseInt(hsMatch[1]), parseInt(hsMatch[2]), parseInt(hsMatch[3]), parseInt(hsMatch[4])];
-          sensorKey = 'hs';
-        } else {
-          const chMatch = ctrlBuf.match(/"ch"\s*:\s*\[([^\]]+)\]/);
-          if (chMatch) {
-            const rawValues = chMatch[1].split(',').map(v => parseInt(v.trim()));
-            if (rawValues.length >= 4) {
-              hwValues = rawValues.slice(0, 4);
-              sensorKey = 'ch';
-            }
-          }
-        }
-
-        if (hwValues && hwValues.length >= 4) {
-          hardwareRawRef.current = {
-            TP9: hwValues[0], AF7: hwValues[1],
-            AF8: hwValues[2], TP10: hwValues[3]
-          };
-          hardwareEverReceived.current = true;
-          recalcTotalSignal();
-          addLog(`👤 电极状态(${sensorKey}) TP9:${hwValues[0]} AF7:${hwValues[1]} AF8:${hwValues[2]} TP10:${hwValues[3]}`);
-          ctrlBuf = '';
+          ctrlBuf = ''; // 解析到数组后清空缓冲
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
