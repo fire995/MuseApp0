@@ -341,12 +341,8 @@ export default function App() {
 
   const flushBufferToFile = async () => {
     if (!logFileUri.current || fileBuffer.current.length === 0) {
-      // 诊断：如果正在保存但条件不满足，输出原因
-      if (isSavingRef.current) {
-        if (!logFileUri.current) {
-          addLog('🔴 [FLUSH] 文件URI为空！无法写入');
-        }
-        // 注意：buffer为空是正常的（没有新数据时）
+      if (isSavingRef.current && !logFileUri.current) {
+        addLog('🔴 [FLUSH] 文件URI为空！无法写入');
       }
       return;
     }
@@ -360,33 +356,28 @@ export default function App() {
       const fileInfo = await FileSystem.getInfoAsync(logFileUri.current);
 
       if (!fileInfo.exists) {
-        // 首写必须禁用 append，并注入 CSV Header
-        addLog(`📝 [FLUSH] 文件不存在，创建并写入 ${chunkLines} 行`);
+        addLog(`📝 [FLUSH] 创建新文件并写入 ${chunkLines} 行`);
         // @ts-ignore
         await FileSystem.writeAsStringAsync(logFileUri.current, 'timestamp,channel,data\n' + chunk, {
           // @ts-ignore
           encoding: FileSystem.EncodingType.UTF8,
         });
       } else {
-        // 后续采用追加模式
+        // Expo FileSystem append 机制在旧版本有坑（会覆盖全文件），所以此处手动追加
         // @ts-ignore
-        await FileSystem.writeAsStringAsync(logFileUri.current, chunk, {
+        const existingData = await FileSystem.readAsStringAsync(logFileUri.current, { encoding: FileSystem.EncodingType.UTF8 });
+        // @ts-ignore
+        await FileSystem.writeAsStringAsync(logFileUri.current, existingData + chunk, {
           // @ts-ignore
           encoding: FileSystem.EncodingType.UTF8,
-          append: true,
         });
       }
 
-      addLog(`✅ [FLUSH] 成功写入 ${chunkLines} 行 (${chunk.length}字节)`);
-
       // @ts-ignore
       const newFileInfo = await FileSystem.getInfoAsync(logFileUri.current);
-      // @ts-ignore
-      if (newFileInfo.exists && newFileInfo.size && newFileInfo.size > 10 * 1024 * 1024) { // 10MB 切片
-        filePartIndex.current += 1;
-        sessionStartTime.current = Date.now();
-        await createNewLogFile();
-      }
+      const sizeKB = newFileInfo.exists && newFileInfo.size ? (newFileInfo.size / 1024).toFixed(1) : 0;
+      addLog(`✅ [FLUSH] 追加 ${chunkLines} 行，当前文件大小: ${sizeKB}KB`);
+
     } catch (e) {
       addLog(`🔴 [FLUSH] 写入异常: ${e}`);
       fileBuffer.current = chunk + fileBuffer.current; // 失败则回退缓冲区
@@ -452,7 +443,7 @@ export default function App() {
         addLog(`💾 [SAVE] 已缓存 ${rows} 行 | 缓冲区: ${fileBuffer.current.length}字节`);
       }
 
-      if (fileBuffer.current.length > 10240) {
+      if (fileBuffer.current.length > 512 * 1024) { // 改为 500KB 刷盘一次，减少磁盘 IO 和读写重叠
         flushBufferToFile();
       }
     } else if (isSavingRef.current && !logFileUri.current && pktNum % 50 === 0) {
@@ -755,31 +746,39 @@ export default function App() {
         addLog(`📝 解码后: ${txt.substring(0, 100)}`);
         ctrlBuf += txt;
 
-        // 解析电池
-        const bpMatch = ctrlBuf.match(/"bp"\s*:\s*(\d+)/);
+        // 解析电池 (兼容整数和浮点数如 "bp":89.23)
+        const bpMatch = ctrlBuf.match(/"bp"\s*:\s*([\d.]+)/);
         if (bpMatch) {
-          const batteryVal = parseInt(bpMatch[1]);
+          const batteryVal = Math.round(parseFloat(bpMatch[1]));
           addLog(`🔋 电池: ${batteryVal}%`);
           setBattery(batteryVal);
-          ctrlBuf = ctrlBuf.replace(/"bp":\s*\d+/, '');
+          ctrlBuf = ctrlBuf.replace(/"bp"\s*:\s*[\d.]+/, '');
         }
 
-        // 解析佩戴质量 (Horseshoe) - 支持整数和浮点数格式
-        // Muse 可能发送 "hs":[1,2,1,4] 或 "hs":[1.0, 2.0, 1.0, 4.0]
-        let hsMatch = ctrlBuf.match(/"hs"\s*:\s*\[\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\]/);
-        if (hsMatch) {
-          const [tp9, af7, af8, tp10] = hsMatch.slice(1).map(v => {
-            const vFloat = parseFloat(v);
-            const vInt = Math.round(vFloat);
-            // Muse horseshoe 值: 1=良好, 2=一般, 3+=差
-            return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
-          });
-          setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
-          const avg = (tp9 + af7 + af8 + tp10) / 4;
-          updateSignal(avg);
-          addLog(`👤 佩戴质量 - TP9:${tp9}% AF7:${af7}% AF8:${af8}% TP10:${tp10}%`);
+        // 解析佩戴质量 - 兼容 Muse 2 ("hs") 和 Muse S ("ch")
+        // Muse S 会返回 "ch": [4.0, 4.0, 4.0, 4.0, 0.0, 0.0] 类的变长数组
+        let arrMatch = ctrlBuf.match(/"(?:hs|ch)"\s*:\s*\[([\d.\s,]+)\]/);
+        if (arrMatch) {
+          const valuesStr = arrMatch[1];
+          // 拆分出所有的数值
+          const values = valuesStr.split(',')
+            .map(v => parseFloat(v.trim()))
+            .filter(v => !isNaN(v));
+
+          if (values.length >= 4) {
+            // 只取前 4 个脑电极：TP9, AF7, AF8, TP10
+            const [tp9, af7, af8, tp10] = values.slice(0, 4).map(vFloat => {
+              const vInt = Math.round(vFloat);
+              // Muse horseshoe 值：1=佩戴良好, 2=一般, 3及以上=差
+              return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
+            });
+            setElectrodeQuality({ TP9: tp9, AF7: af7, AF8: af8, TP10: tp10 });
+            const avg = (tp9 + af7 + af8 + tp10) / 4;
+            updateSignal(avg);
+            addLog(`👤 佩戴质量 - TP9:${tp9}% AF7:${af7}% AF8:${af8}% TP10:${tp10}%`);
+          }
           // 彻底清除处理过的数据段
-          ctrlBuf = ctrlBuf.replace(/"hs"\s*:\s*\[[\d.\s,]+\]/, '');
+          ctrlBuf = ctrlBuf.replace(/"(?:hs|ch)"\s*:\s*\[[\d.\s,]+\]/, '');
         }
 
         if (cmdResolve && ctrlBuf.includes('"rc":0')) {
