@@ -190,8 +190,11 @@ export default function App() {
   const dataFlowActive = useRef<boolean>(false);    // 数据流是否已激活
   const packetCountRef = useRef<number>(0);         // 总数据包计数（不触发UI）
   const saveRowCount = useRef<number>(0);           // 保存的行数
-  const horseshoeScore = useRef<number>(50);         // 最新佩戴质量分 (默认50，防止初始为0锁死)
-  const hardwareQualityRef = useRef<Record<string, number>>({ TP9: 50, AF7: 50, AF8: 50, TP10: 50 }); // 各通道硬件独立分
+  const horseshoeScore = useRef<number>(50);         // 兼容保留(不再作为主逻辑)
+  // 硬件原生状态: 1=Good, 2=OK, 4=Bad (默认4=未佩戴)
+  const hardwareRawRef = useRef<Record<string, number>>({ TP9: 4, AF7: 4, AF8: 4, TP10: 4 });
+  // 软件质量分析分 (0-100)
+  const softwareRawRef = useRef<Record<string, number>>({ TP9: 0, AF7: 0, AF8: 0, TP10: 0 });
   const diagnosticTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const dataQualityTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const eegBufRef = useRef<Record<string, number[]>>({
@@ -208,43 +211,52 @@ export default function App() {
     setLogs(prev => [msg, ...prev].slice(0, 25));
   }, []);
 
-  // ── 双因子信号质量（佩戴贴合度 + 数据接收率）────────────────────
-  // Factor 1: horseshoe 电极贴合度（从 Control 通道解析）
-  // Factor 2: 数据接收率（EEG 数据包是否持续到达）
-  const recalcSignal = useCallback(() => {
-    const hs = horseshoeScore.current;
+  // ── 信号总分算法 (总分100 = 硬件60分 + 波形40分) ────────────────────
+  const recalcTotalSignal = useCallback(() => {
+    let hwScore = 0;
+    const newUIQuality: Record<string, number> = {};
+
+    ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
+      const hwValue = hardwareRawRef.current[ch] || 4; // 默认为4(差)
+      if (hwValue === 1) {
+        hwScore += 15;
+        newUIQuality[ch] = 100; // UI绿灯
+      } else if (hwValue === 2) {
+        hwScore += 10;
+        newUIQuality[ch] = 50;  // UI黄灯
+      } else {
+        hwScore += 0;
+        newUIQuality[ch] = 0;   // UI红灯
+      }
+    });
+
+    const softValues = Object.values(softwareRawRef.current);
+    const avgSoft = softValues.reduce((a, b) => a + b, 0) / 4;
+    const swScore = avgSoft * 0.4; // 软件占比 40%
+
+    // 更新各通道圆圈灯光颜色
+    setElectrodeQuality(newUIQuality);
+
+    // 计算总分
+    let finalScore = Math.round(hwScore + swScore);
+
+    // 若在这5秒内根本没收到数据，强行降为 0 分
     const now = Date.now();
     const timeSinceData = now - lastDataTime.current;
-    const hasDataFlow = lastDataTime.current > 0 && timeSinceData < 5000; // 5秒内有数据
-
-    // 双因子评分逻辑:
-    // - 佩戴质量权重 60%，数据接收权重 40%
-    // - 如果完全没有数据流：上限为 25 分（即使佩戴完美）
-    // - 如果佩戴差但数据流正常：上限为 40 分
-    let combined: number;
-    if (!hasDataFlow && hs === 0) {
-      combined = 0;  // 完全没信号
-    } else if (!hasDataFlow) {
-      combined = Math.round(hs * 0.25);  // 佩戴ok但没数据
-    } else if (hs === 0) {
-      combined = 30;  // 有数据但没佩戴信息（可能 horseshoe 还没上报）
-    } else {
-      combined = Math.round(hs * 0.6 + (hasDataFlow ? 100 : 0) * 0.4);
+    if (lastDataTime.current === 0 || timeSinceData > 5000) {
+      finalScore = 0; // 无有效数据流
     }
 
+    // 信号分平滑处理机制（避免分数值频繁乱跳）
     const buf = signalBuf.current;
-    buf.push(combined);
-    if (buf.length > 10) buf.shift();
+    buf.push(finalScore);
+    if (buf.length > 5) buf.shift(); // 存最近5次
     const sorted = [...buf].sort((a, b) => a - b);
     const mid = sorted[Math.floor(sorted.length / 2)];
+
     setSignalScore(mid);
     setSignalLevel(mid >= 65 ? 'good' : mid >= 35 ? 'ok' : mid > 0 ? 'poor' : 'none');
   }, []);
-
-  const updateSignal = useCallback((horseshoeRaw: number) => {
-    horseshoeScore.current = horseshoeRaw;
-    recalcSignal();
-  }, [recalcSignal]);
 
   useEffect(() => {
     setupMusicPlayer();
@@ -268,12 +280,13 @@ export default function App() {
       const bufLen = fileBuffer.current.length;
       const savedRows = saveRowCount.current;
       const fileUri = logFileUri.current;
-      const hsScore = horseshoeScore.current;
+      const hwObj = hardwareRawRef.current;
+      const hwStr = `[${hwObj.TP9},${hwObj.AF7},${hwObj.AF8},${hwObj.TP10}]`;
 
       // 只在连接状态下输出诊断（避免未连接时刷屏）
       if (pktTotal > 0 || saving) {
         addLog(`── 诊断 ──`);
-        addLog(`📡 数据流: ${pktTotal}包 | 最后收到: ${timeSinceData}秒前 | 佩戴分: ${hsScore}`);
+        addLog(`📡 数据流: ${pktTotal}包 | 最后收到: ${timeSinceData}秒前 | 硬件原值: ${hwStr}`);
         if (saving) {
           addLog(`💾 保存: ${savedRows}行已写入 | 缓冲: ${bufLen}字节 | 文件: ${fileUri ? '✓' : '✗'}`);
         }
@@ -281,7 +294,7 @@ export default function App() {
 
       // 同时刷新信号评分（补充数据流因子的时效性）
       if (lastDataTime.current > 0) {
-        recalcSignal();
+        recalcTotalSignal();
       }
     }, 5000);
 
@@ -289,43 +302,22 @@ export default function App() {
     dataQualityTimer.current = setInterval(() => {
       if (lastDataTime.current === 0) return;
 
-      const qs: number[] = [];
       const chMap: Record<string, string> = {
         '0013': 'TP9', '0014': 'AF7', '0015': 'AF8', '0016': 'TP10'
       };
 
-      setElectrodeQuality(prev => {
-        let changed = false;
-        const next = { ...prev };
-
-        for (const [chId, buf] of Object.entries(eegBufRef.current)) {
-          if (buf.length >= 64) {
-            // 获取软件分析出的分数
-            const raw_q = calculateSignalQuality(buf);
-            const name = chMap[chId];
-
-            // 策略：Python原版融合算法 => 硬件 40%，软件 60%
-            // 如果硬件说完全没贴合(0)，则强制为0
-            const hn_q = name ? hardwareQualityRef.current[name] : 50;
-            const combined_q = hn_q > 0 ? Math.round(hn_q * 0.4 + raw_q * 0.6) : 0;
-            qs.push(combined_q);
-
-            if (name && next[name] !== combined_q) {
-              next[name] = combined_q;
-              changed = true;
-            }
+      for (const [chId, buf] of Object.entries(eegBufRef.current)) {
+        if (buf.length >= 64) {
+          // 获取软件分析出的分数
+          const raw_q = calculateSignalQuality(buf);
+          const name = chMap[chId];
+          if (name) {
+            softwareRawRef.current[name] = raw_q;
           }
         }
+      }
 
-        if (qs.length > 0) {
-          qs.sort((a, b) => a - b);
-          const mid = qs[Math.floor(qs.length / 2)];
-          horseshoeScore.current = mid;
-          recalcSignal(); // 立即触发 UI 刷新
-        }
-
-        return changed ? next : prev;
-      });
+      recalcTotalSignal(); // 更新总分和灯效
 
     }, 2000);
 
@@ -475,7 +467,7 @@ export default function App() {
     if (!dataFlowActive.current) {
       dataFlowActive.current = true;
       addLog('✅ 数据流已激活 — 首个 EEG 数据包到达');
-      recalcSignal();
+      recalcTotalSignal();
     }
 
     // 节流日志：每 50 个包才输出一次（避免 1500+/sec 的 addLog 冻结 UI）
@@ -485,15 +477,17 @@ export default function App() {
 
     // 1. 全量保存原始数据（TXT 格式）：不再经过 0.5s 节流，保存所有的 EEG 包
     if (isSavingRef.current && logFileUri.current) {
-      // 取当前电极质量和信号分
-      const hs = horseshoeScore.current;
+      // 取当前通道硬件状态和系统总分
+      const hwObj = hardwareRawRef.current;
+      const hwStr = `${hwObj.TP9},${hwObj.AF7},${hwObj.AF8},${hwObj.TP10}`;
       const sig = signalBuf.current.length > 0
         ? signalBuf.current[signalBuf.current.length - 1]
         : 0;
 
-      // 写入全部完整数据（不再截断前64字符）
+      // 写入全部完整数据
       const timestamp = new Date().toISOString();
-      const line = `${timestamp} | ch=${channel} | sig=${sig} | hs=${hs} | ${base64Data}\n`;
+      // 在 TXT 里打印 hw=[TP9,AF7,AF8,TP10] 原始值（1/2/4），替代之前的杂糅值
+      const line = `${timestamp} | ch=${channel} | sig=${sig} | hw=[${hwStr}] | ${base64Data}\n`;
       fileBuffer.current += line;
       saveRowCount.current += 1;
 
@@ -871,28 +865,17 @@ export default function App() {
             .filter(v => !isNaN(v));
 
           if (values.length >= 4) {
-            // 获取 TP9, AF7, AF8, TP10 的硬件佩戴值
-            // 硬件值：1=Good(100%), 2=OK(50%), 4=Poor(0%)
-            const hardwareScores = values.slice(0, 4).map(vFloat => {
-              const vInt = Math.round(vFloat);
-              return vInt === 1 ? 100 : vInt === 2 ? 50 : 0;
-            });
-
-            // 更新硬件参考池
-            hardwareQualityRef.current = {
-              TP9: hardwareScores[0],
-              AF7: hardwareScores[1],
-              AF8: hardwareScores[2],
-              TP10: hardwareScores[3]
+            // 获取 TP9, AF7, AF8, TP10 的硬件佩戴原始值：1=Good, 2=OK, 4=Poor
+            hardwareRawRef.current = {
+              TP9: Math.round(values[0] || 4),
+              AF7: Math.round(values[1] || 4),
+              AF8: Math.round(values[2] || 4),
+              TP10: Math.round(values[3] || 4)
             };
 
-            // 注意：因为 dataQualityTimer 每 2 秒会自动执行硬+软融合
-            // 这里为了 UI 立刻更新，我们可以触发一个计算但不全量替换
-            const sorted = [...hardwareScores].sort((a, b) => a - b);
-            horseshoeScore.current = sorted[Math.floor(sorted.length / 2)];
-            recalcSignal();
+            recalcTotalSignal();
 
-            addLog(`👤 佩戴 - TP9:${hardwareScores[0]}% AF7:${hardwareScores[1]}% AF8:${hardwareScores[2]}% TP10:${hardwareScores[3]}%`);
+            addLog(`👤 硬件原始值更新 - TP9:${hardwareRawRef.current.TP9} AF7:${hardwareRawRef.current.AF7} AF8:${hardwareRawRef.current.AF8} TP10:${hardwareRawRef.current.TP10}`);
           }
           ctrlBuf = ctrlBuf.replace(/"(?:hs|ch|hn)"\s*:\s*\[[\d.\s,]+\]/, '');
         }
