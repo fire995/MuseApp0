@@ -934,7 +934,9 @@ export default function App() {
         addLog(`🔍 尝试订阅通道: ${channelId} (UUID: ${uuid})`);
 
         // 如果有可用 UUID 列表，检查该通道是否存在
-        if (availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
+        // 注意：Muse S 的 UUID 大小写可能不一致，强制订阅所有 EEG 通道
+        const isEEG = ['0013', '0014', '0015', '0016'].includes(channelId);
+        if (!isEEG && availableUUIDs.length > 0 && !availableUUIDs.includes(uuidLower)) {
           addLog(`⏭️ 跳过不可用通道: ${channelId}`);
           continue;
         }
@@ -1150,9 +1152,7 @@ export default function App() {
           </View>
         </View>
         <View style={{ alignItems: 'flex-end', gap: 4 }}>
-          {signalScore > 0 && (
-            <Text style={[s.sigScore, { color: SIG.color }]}>{signalScore}%</Text>
-          )}
+          <Text style={[s.sigScore, { color: SIG.color }]}>{signalScore}%</Text>
           {packetsRx > 0 && (
             <Text style={s.pktBadge}>
               {packetsRx < 1000 ? `${packetsRx}包` : `${(packetsRx / 1000).toFixed(1)}k包`}
