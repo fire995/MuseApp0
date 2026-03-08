@@ -8,7 +8,7 @@ import * as DocumentPicker from '@react-native-documents/picker';
 // @ts-ignore
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-const JSZip = require('jszip');
+import { zipSync, strToU8 } from 'fflate';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
@@ -470,18 +470,20 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 return;
             }
 
-            // 使用纯 JS 构建 Zip，防止未提前构建包含 Native 模块的自定义安装包导致奔溃
-            const zip = new JSZip();
+            // 使用 fflate 构建 Zip，零依赖零原生组件实现，彻底杜绝崩溃与打包异常
+            const zipData: Record<string, Uint8Array> = {};
 
             for (const f of dataFiles) {
                 const content = await FileSystem.readAsStringAsync(documentDir + f, { encoding: FileSystem.EncodingType.UTF8 });
-                zip.file(f, content);
+                zipData[f] = strToU8(content);
             }
 
             const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
             const zipPath = `${documentDir}MuseData_Export_${timeStr}.zip`;
 
-            const zipBase64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
+            const zippedBytes = zipSync(zipData, { level: 6 });
+            const zipBase64 = Buffer.from(zippedBytes).toString('base64');
+
             await FileSystem.writeAsStringAsync(zipPath, zipBase64, { encoding: FileSystem.EncodingType.Base64 });
 
             await Sharing.shareAsync(zipPath, { dialogTitle: '导出 Muse 完整采集包' });
