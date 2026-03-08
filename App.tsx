@@ -911,6 +911,12 @@ export default function App() {
         const d = await device.connect();
         await sleep(500);
         await d.discoverAllServicesAndCharacteristics();
+        if (Platform.OS === 'android') {
+          try {
+            await d.requestMTU(512);
+            addLog('🔧 已请求高 MTU');
+          } catch (e) { addLog('⚠️ MTU 协商失败'); }
+        }
         await startMuseProtocol(d);
         isAutoRecon.current = false;
         addLog('✅ 重连成功');
@@ -952,6 +958,14 @@ export default function App() {
           setSavedDeviceId(d.id);
           await sleep(500);
           await d.discoverAllServicesAndCharacteristics();
+
+          if (Platform.OS === 'android') {
+            try {
+              await d.requestMTU(512);
+              addLog('🔧 已请求高 MTU');
+            } catch (e) { addLog('⚠️ MTU 协商失败'); }
+          }
+
           deviceRef.current = d;
           await startMuseProtocol(d);
         } catch (e: any) {
@@ -974,6 +988,14 @@ export default function App() {
       const d = await bleManager.connectToDevice(id);
       await sleep(500);
       await d.discoverAllServicesAndCharacteristics();
+
+      if (Platform.OS === 'android') {
+        try {
+          await d.requestMTU(512);
+          addLog('🔧 已请求高 MTU');
+        } catch (e) { addLog('⚠️ MTU 协商失败'); }
+      }
+
       deviceRef.current = d;
       await startMuseProtocol(d);
       addLog('✅ 自动连接成功');

@@ -117,22 +117,30 @@ export function parseMusePacket(base64Data: string, channelId: string): DecodedP
 
   const typeByte = buf[0];
 
-  if (typeByte === 0xDF) {
-    // ── 0xDF: EEG + PPG 混合包（p1035 模式核心包型）──────────────
-    result.packetTypeName = 'EEG_PPG';
-    _decode_DF(buf, result);
-  } else if (typeByte === 0xF4) {
-    // ── 0xF4: IMU 包（本次暂不解码，留作后续）───────────────────
-    result.packetTypeName = 'IMU';
-  } else if (typeByte === 0xDB || typeByte === 0xD9) {
-    // ── 0xDB/0xD9: 混合包，尝试通用解析 ──────────────────────
-    result.packetTypeName = typeByte === 0xDB ? 'MIXED_DB' : 'MIXED_D9';
-    _decode_generic(buf.slice(4), result);
-  } else {
-    // ── 传统独立通道包（ch=0013~0016，按 20 字节标准格式）─────
-    result.packetTypeName = `LEGACY_CH${channelId}`;
-    _decode_legacy(buf, channelId, result);
+  // 关键修复：当 packet length <= 20 时，通常是因为手机 MTU 没调整好被截断，或者是头环发送的 Legacy 数据（旧模式）。
+  // 这个时候，buf[0] 只不过是自增的包序号的第一个字节（比如 0xDF, 0xF4... 纯属巧合），
+  // 如果直接按包类型处理就会导致全部报错或者数据空白。
+  if (buf.length > 20) {
+    if (typeByte === 0xDF) {
+      // ── 0xDF: EEG + PPG 混合包（p1035 模式核心包型）──────────────
+      result.packetTypeName = 'EEG_PPG';
+      _decode_DF(buf, result);
+      return result;
+    } else if (typeByte === 0xF4) {
+      // ── 0xF4: IMU 包（本次暂不解码，留作后续）───────────────────
+      result.packetTypeName = 'IMU';
+      return result;
+    } else if (typeByte === 0xDB || typeByte === 0xD9) {
+      // ── 0xDB/0xD9: 混合包，尝试通用解析 ──────────────────────
+      result.packetTypeName = typeByte === 0xDB ? 'MIXED_DB' : 'MIXED_D9';
+      _decode_generic(buf.slice(4), result);
+      return result;
+    }
   }
+
+  // ── 传统独立通道包（ch=0013~0016，按 20 字节标准格式）─────
+  result.packetTypeName = `LEGACY_CH${channelId}`;
+  _decode_legacy(buf, channelId, result);
 
   return result;
 }
@@ -197,12 +205,23 @@ function _decode_generic(buf: Buffer, result: DecodedPacket) {
 
 /**
  * 传统独立通道解码（旧固件 / p21 低功耗模式）
- * 格式：[seq:2][data:18] = 20 字节，data 部分为 12 个 12-bit EEG 样本
  */
 function _decode_legacy(buf: Buffer, channelId: string, result: DecodedPacket) {
   if (buf.length < 4) return;
 
-  // 传统格式：跳过 2 字节序号，读 18 字节数据
+  // 区分 Legacy EEG 还是 Legacy PPG
+  if (channelId === '0010' || channelId === '0011') {
+    // 传统 PPG 格式：[seq:2] + [18 byte 数据 (6个24-bit/20-bit样本)]
+    // 因为 _unpackPPG20 内部刚好就是跳过了 offset 后的头2字节，所以可以直接复用
+    const ppgSamples = _unpackPPG20(buf, 0);
+    if (ppgSamples.length > 0) {
+      result.ppg = ppgSamples;
+      result.hasPPG = true;
+    }
+    return;
+  }
+
+  // 传统 EEG 格式：跳过 2 字节序号，读 18 字节数据
   const offset = 2;
   if (buf.length - offset < 18) {
     // 短包：直接从 offset 2 拆，按 3 字节一组
