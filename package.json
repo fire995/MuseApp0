@@ -35,8 +35,7 @@
     "react-native-safe-area-context": "^5.7.0",
     "react-native-screens": "^4.24.0",
     "react-native-share": "^12.2.5",
-    "react-native-track-player": "5.0.0-alpha0",
-    "rn-fetch-blob": "^0.12.0"
+    "react-native-track-player": "5.0.0-alpha0"
   },
   "devDependencies": {
     "@react-native-community/cli": "^20.1.2",
