@@ -54,6 +54,15 @@ interface MuseDeviceContextType {
     denseMins: number;
     setDenseMins: (v: number) => void;
     heartRate: number | null;
+    // 自动保存设置
+    autoSaveEnabled: boolean;
+    setAutoSaveEnabled: (v: boolean) => void;
+    autoSaveIntervalSec: number;
+    setAutoSaveIntervalSec: (v: number) => void;
+    autoSaveRetainDays: number;
+    setAutoSaveRetainDays: (v: number) => void;
+    autoSaveTempSize: number; // bytes, 当前临时文件夹总大小
+    clearAutoSaveTempFiles: () => Promise<void>;
 
     scanAndConnect: () => Promise<void>;
     clearPairedDevice: () => Promise<void>;
@@ -91,6 +100,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const [saveDuration, setSaveDuration] = useState(0);
     const [denseMins, setDenseMins] = useState(30);
     const [heartRate, setHeartRate] = useState<number | null>(null);
+
+    // 自动保存设置（从 AsyncStorage 加载，默认值）
+    const [autoSaveEnabled, setAutoSaveEnabledState] = useState(true);
+    const [autoSaveIntervalSec, setAutoSaveIntervalSecState] = useState(120);
+    const [autoSaveRetainDays, setAutoSaveRetainDaysState] = useState(7);
+    const [autoSaveTempSize, setAutoSaveTempSize] = useState(0);
+    const autoSaveEnabledRef = useRef(true);
+    const autoSaveIntervalSecRef = useRef(120);
+    const autoSaveRetainDaysRef = useRef(7);
 
     const logFileUri = useRef<string | null>(null);
     const fileBuffer = useRef<string>('');
@@ -165,14 +183,14 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 if (!dirUri) return;
                 const files = await FileSystem.readDirectoryAsync(dirUri);
                 const now = Date.now();
-                const SEVEN_DAYS_MS = 7 * 24 * 3600 * 1000;
+                const retainMs = autoSaveRetainDaysRef.current * 24 * 3600 * 1000;
                 for (const file of files) {
                     if (file.endsWith('.csv') || file.endsWith('.zip') || file.endsWith('.txt')) {
                         const fileUri = file.startsWith('file://') ? file : dirUri + file;
                         const fileInfo = await FileSystem.getInfoAsync(fileUri);
-                        if (fileInfo.exists && !fileInfo.isDirectory && (now - (fileInfo.modificationTime || 0) * 1000) > SEVEN_DAYS_MS) {
+                        if (fileInfo.exists && !fileInfo.isDirectory && (now - (fileInfo.modificationTime || 0) * 1000) > retainMs) {
                             await FileSystem.deleteAsync(fileUri, { idempotent: true });
-                            console.log(`🗑️ 已清理过期日志 ${file}`);
+                            console.log(`🗑️ 已清理过期日志 ${file}（超过 ${autoSaveRetainDaysRef.current} 天）`);
                         }
                     }
                 }
@@ -217,6 +235,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     }, []);
 
     const MAX_PART_SIZE = 5 * 1024 * 1024;
+    const BUFFER_FLUSH_THRESHOLD = 64 * 1024; // 64KB，更激进的防闪退策略
     const flushBufferToFile = async () => {
         if (!logFileUri.current || fileBuffer.current.length === 0) return;
         const chunk = fileBuffer.current;
@@ -283,7 +302,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             const line = `${timestamp} | ch=${channel} | type=${decoded.packetTypeName} | sig=${sig} | ${hrStr} | ${base64Data}\n`;
             fileBuffer.current += line;
             saveRowCount.current += 1;
-            if (fileBuffer.current.length > 256 * 1024) flushBufferToFile();
+            if (fileBuffer.current.length > BUFFER_FLUSH_THRESHOLD) flushBufferToFile();
         }
 
         if (decoded.hasEEG) {
@@ -384,7 +403,12 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             startForegroundCapture();
 
             if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
-            autoSaveTimerRef.current = setInterval(() => { flushBufferToFile(); }, 120000);
+            if (autoSaveEnabledRef.current) {
+                autoSaveTimerRef.current = setInterval(
+                    () => { flushBufferToFile(); },
+                    autoSaveIntervalSecRef.current * 1000
+                );
+            }
         } else {
             setIsSaving(false);
             if (autoSaveTimerRef.current) { clearInterval(autoSaveTimerRef.current); autoSaveTimerRef.current = null; }
@@ -541,10 +565,96 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         setTimeout(() => { userDisconnect.current = false; }, 1000);
     };
 
+    // ---- 自动保存设置的持久化 setter ----
+    const setAutoSaveEnabled = useCallback(async (v: boolean) => {
+        autoSaveEnabledRef.current = v;
+        setAutoSaveEnabledState(v);
+        await AsyncStorage.setItem('AUTO_SAVE_ENABLED', JSON.stringify(v));
+        // 重新绑定定时器
+        if (autoSaveTimerRef.current) { clearInterval(autoSaveTimerRef.current); autoSaveTimerRef.current = null; }
+        if (v && isSavingRef.current) {
+            autoSaveTimerRef.current = setInterval(
+                () => { flushBufferToFile(); },
+                autoSaveIntervalSecRef.current * 1000
+            );
+        }
+    }, []);
+
+    const setAutoSaveIntervalSec = useCallback(async (v: number) => {
+        autoSaveIntervalSecRef.current = v;
+        setAutoSaveIntervalSecState(v);
+        await AsyncStorage.setItem('AUTO_SAVE_INTERVAL', JSON.stringify(v));
+        // 重新绑定定时器（仅在采集中时）
+        if (autoSaveTimerRef.current) { clearInterval(autoSaveTimerRef.current); autoSaveTimerRef.current = null; }
+        if (autoSaveEnabledRef.current && isSavingRef.current) {
+            autoSaveTimerRef.current = setInterval(
+                () => { flushBufferToFile(); },
+                v * 1000
+            );
+        }
+    }, []);
+
+    const setAutoSaveRetainDays = useCallback(async (v: number) => {
+        autoSaveRetainDaysRef.current = v;
+        setAutoSaveRetainDaysState(v);
+        await AsyncStorage.setItem('AUTO_SAVE_RETAIN_DAYS', JSON.stringify(v));
+    }, []);
+
+    // 计算并刷新临时文件夹大小
+    const refreshTempSize = useCallback(async () => {
+        try {
+            const dir = FileSystem.documentDirectory;
+            if (!dir) return;
+            const files = await FileSystem.readDirectoryAsync(dir);
+            let total = 0;
+            for (const f of files) {
+                if (f.startsWith('muse_data_') && f.endsWith('.txt')) {
+                    const info = await FileSystem.getInfoAsync(dir + f);
+                    if (info.exists && !info.isDirectory) total += (info.size ?? 0);
+                }
+            }
+            setAutoSaveTempSize(total);
+        } catch { }
+    }, []);
+
+    // 清理临时文件（手动触发）
+    const clearAutoSaveTempFiles = useCallback(async () => {
+        try {
+            const dir = FileSystem.documentDirectory;
+            if (!dir) return;
+            const files = await FileSystem.readDirectoryAsync(dir);
+            for (const f of files) {
+                if ((f.startsWith('muse_data_') || f.startsWith('muse_log_')) && (f.endsWith('.txt') || f.endsWith('.csv'))) {
+                    await FileSystem.deleteAsync(dir + f, { idempotent: true });
+                }
+            }
+            setAutoSaveTempSize(0);
+        } catch { }
+    }, []);
+
+    // 初始化：从 AsyncStorage 恢复自动保存设置
+    useEffect(() => {
+        (async () => {
+            try {
+                const en = await AsyncStorage.getItem('AUTO_SAVE_ENABLED');
+                const interval = await AsyncStorage.getItem('AUTO_SAVE_INTERVAL');
+                const retain = await AsyncStorage.getItem('AUTO_SAVE_RETAIN_DAYS');
+                if (en !== null) { const v = JSON.parse(en); autoSaveEnabledRef.current = v; setAutoSaveEnabledState(v); }
+                if (interval !== null) { const v = JSON.parse(interval); autoSaveIntervalSecRef.current = v; setAutoSaveIntervalSecState(v); }
+                if (retain !== null) { const v = JSON.parse(retain); autoSaveRetainDaysRef.current = v; setAutoSaveRetainDaysState(v); }
+            } catch { }
+            await refreshTempSize();
+        })();
+    }, []);
+
     return (
         <MuseDeviceContext.Provider value={{
             battery, signalLevel, signalScore, electrodeQuality, packetsRx, samplingMode, savedDeviceId, thetaWave,
             isPlaying, musicName, isSaving, savePath, saveDuration, denseMins, setDenseMins, heartRate,
+            autoSaveEnabled, setAutoSaveEnabled,
+            autoSaveIntervalSec, setAutoSaveIntervalSec,
+            autoSaveRetainDays, setAutoSaveRetainDays,
+            autoSaveTempSize, clearAutoSaveTempFiles,
             scanAndConnect, clearPairedDevice, toggleSave, exportSavedFile, pickAndPlay, togglePlay
         }}>
             {children}
