@@ -17,7 +17,10 @@ import * as Sharing from 'expo-sharing';
 import Zip from 'react-native-zip-archive';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { decodeEEG, analyzeFrequency, calculateSignalQuality } from './utils/MuseDecoder';
+import {
+  parseMusePacket, analyzeFrequency, calculateSignalQuality,
+  HeartRateCalculator, EEG_CHANNEL_NAMES,
+} from './utils/MuseDecoder';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
 
@@ -193,12 +196,19 @@ export default function App() {
   const packetCountRef = useRef<number>(0);
   const saveRowCount = useRef<number>(0);
   // 软件质量分析分 (0-100, 基于频段能量比)
-  const softwareRawRef = useRef<Record<string, number>>({ TP9: 0, AF7: 0, AF8: 0, TP10: 0 });
+  const softwareRawRef = useRef<Record<string, number>>(
+    Object.fromEntries(EEG_CHANNEL_NAMES.map(ch => [ch, 0]))
+  );
   const diagnosticTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const dataQualityTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const eegBufRef = useRef<Record<string, number[]>>({
-    '0013': [], '0014': [], '0015': [], '0016': []
-  });
+  // 7 通道 EEG 缓冲（按通道名索引）
+  const eegBufRef = useRef<Record<string, number[]>>(
+    Object.fromEntries(EEG_CHANNEL_NAMES.map(ch => [ch, []]))
+  );
+  // PPG / 心率
+  const hrCalcRef = useRef(new HeartRateCalculator());
+  const [heartRate, setHeartRate] = useState<number | null>(null);
+  const lastHRTime = useRef<number>(0);
   const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const saveDurationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -207,27 +217,25 @@ export default function App() {
     setLogs(prev => [msg, ...prev].slice(0, 25));
   }, []);
 
-  // ── 信号总分算法 (100% 基于软件波形分析，因为这台 Muse S 不发送硬件电极组数据) ──────
+  // ── 信号总分算法 (100% 基于软件波形分析) ────────────────────────
   const recalcTotalSignal = useCallback(() => {
     const newUIQuality: Record<string, number> = {};
 
-    // 纯软件分析：每个通道独立评分 0-100
+    // 展示前 4 个主通道的分数（与 Horseshoe UI 对应）
     ['TP9', 'AF7', 'AF8', 'TP10'].forEach(ch => {
-      const sq = softwareRawRef.current[ch] || 0;
-      newUIQuality[ch] = sq;
+      newUIQuality[ch] = softwareRawRef.current[ch] || 0;
     });
-
     setElectrodeQuality(newUIQuality);
 
-    // 总分 = 4个通道软件分的平均值
-    const softValues = Object.values(softwareRawRef.current);
-    const avgSoft = softValues.reduce((a, b) => a + b, 0) / Math.max(softValues.length, 1);
+    // 总分 = 已有评分的通道平均值（只计算有数据的通道）
+    const softValues = Object.values(softwareRawRef.current).filter(v => v > 0);
+    const avgSoft = softValues.length > 0
+      ? softValues.reduce((a, b) => a + b, 0) / softValues.length
+      : 0;
     let finalScore = Math.round(avgSoft);
 
-    // 若在5秒内根本没收到数据，强行降为 0 分
     const now = Date.now();
-    const timeSinceData = now - lastDataTime.current;
-    if (lastDataTime.current === 0 || timeSinceData > 5000) {
+    if (lastDataTime.current === 0 || now - lastDataTime.current > 5000) {
       finalScore = 0;
     }
 
@@ -283,23 +291,14 @@ export default function App() {
     dataQualityTimer.current = setInterval(() => {
       if (lastDataTime.current === 0) return;
 
-      const chMap: Record<string, string> = {
-        '0013': 'TP9', '0014': 'AF7', '0015': 'AF8', '0016': 'TP10'
-      };
-
-      for (const [chId, buf] of Object.entries(eegBufRef.current)) {
+      // 遍历所有 7 个 EEG 通道（按通道名索引）
+      for (const [chName, buf] of Object.entries(eegBufRef.current)) {
         if (buf.length >= 64) {
-          // 获取软件分析出的分数
-          const raw_q = calculateSignalQuality(buf);
-          const name = chMap[chId];
-          if (name) {
-            softwareRawRef.current[name] = raw_q;
-          }
+          softwareRawRef.current[chName] = calculateSignalQuality(buf);
         }
       }
 
-      recalcTotalSignal(); // 更新总分和灯效
-
+      recalcTotalSignal();
     }, 2000);
 
     return () => {
@@ -450,72 +449,90 @@ export default function App() {
   };
 
   const handleMuseDataPacket = (channel: string, base64Data: string) => {
-    // 更新数据流追踪（不触发 UI 渲染，只更新 ref）
     const now = Date.now();
     lastDataTime.current = now;
     packetCountRef.current += 1;
     const pktNum = packetCountRef.current;
 
-    // 首次收到数据时激活数据流并重算信号
     if (!dataFlowActive.current) {
       dataFlowActive.current = true;
-      addLog('✅ 数据流已激活 — 首个 EEG 数据包到达');
+      addLog('✅ 数据流已激活 — 首个数据包到达');
       recalcTotalSignal();
     }
 
-    // 节流日志：每 50 个包才输出一次（避免 1500+/sec 的 addLog 冻结 UI）
-    if (pktNum <= 3 || pktNum % 50 === 0) {
-      addLog(`📦 [${channel}] #${pktNum} (${base64Data.length}字节)`);
+    // ── 使用新的结构化解码器 ────────────────────────────────────
+    let decoded;
+    try {
+      decoded = parseMusePacket(base64Data, channel);
+    } catch (e) {
+      addLog(`❌ [${channel}] 解包失败: ${e}`);
+      return;
     }
 
-    // 1. 全量保存原始数据（TXT 格式）：不再经过 0.5s 节流，保存所有的 EEG 包
+    // 节流日志
+    if (pktNum <= 3 || pktNum % 50 === 0) {
+      const eegChs = Object.keys(decoded.eeg).join(',');
+      addLog(`📦 [${channel}] #${pktNum} ${decoded.packetTypeName} EEG:[${eegChs}] PPG:${decoded.hasPPG ? '✓' : '✗'}`);
+    }
+
+    // ── 1. 保存原始数据（解码后的结构化格式）──────────────────
     if (isSavingRef.current && logFileUri.current) {
-      // 获取系统总分
       const sig = signalBuf.current.length > 0
         ? signalBuf.current[signalBuf.current.length - 1]
         : 0;
-
-      // 写入全部完整数据 (移除了硬件状态 hw，因为它对当前固件不准且不再需要)
+      const hrStr = heartRate != null ? `hr=${heartRate}` : 'hr=--';
       const timestamp = new Date().toISOString();
-      const line = `${timestamp} | ch=${channel} | sig=${sig} | ${base64Data}\n`;
+      // 结构化格式：type 字段标识数据类型，便于后续解析
+      const line = `${timestamp} | ch=${channel} | type=${decoded.packetTypeName} | sig=${sig} | ${hrStr} | ${base64Data}\n`;
       fileBuffer.current += line;
       saveRowCount.current += 1;
 
-      // 写入文件缓冲
-      if (fileBuffer.current.length > 256 * 1024) {
-        flushBufferToFile();
-      }
+      if (fileBuffer.current.length > 256 * 1024) flushBufferToFile();
     }
 
-    // 2. 实时解码和显示（始终运行）
-    // 所有 EEG 通道都用于波形和频域分析
-    if (channel === '0013' || channel === '0014' || channel === '0015' || channel === '0016') {
-      try {
-        const samples = decodeEEG(base64Data);
-
-        if (pktNum <= 3) {
-          addLog(`✅ [${channel}] 解码: ${samples.length}样本 [${samples.slice(0, 3).map(v => v.toFixed(1)).join(', ')}...]`);
+    // ── 2. EEG 通道处理（7 通道）─────────────────────────────
+    if (decoded.hasEEG) {
+      let allSamples: number[] = [];
+      for (const [chName, samples] of Object.entries(decoded.eeg)) {
+        if (!samples || samples.length === 0) continue;
+        // 更新该通道的信号缓冲
+        const buf = eegBufRef.current[chName];
+        if (buf) {
+          buf.push(...samples);
+          if (buf.length > 256) buf.splice(0, buf.length - 256);
         }
+        allSamples = allSamples.concat(samples);
+      }
 
-        if (samples.length > 0) {
-          // 维护缓冲（保留最新 256 点 = 1 秒用作信号分析）
-          const buf = eegBufRef.current[channel];
-          if (buf) {
-            buf.push(...samples);
-            if (buf.length > 256) {
-              buf.splice(0, buf.length - 256);
-            }
+      if (pktNum <= 3) {
+        const chs = Object.keys(decoded.eeg);
+        const first = Object.values(decoded.eeg)[0] || [];
+        addLog(`✅ EEG ${chs.length}通道: [${chs.join(',')}] 样本示例: ${first.slice(0, 2).map(v => v.toFixed(1)).join(',')}μV`);
+      }
+
+      // 用第一个可用通道的样本做 Theta 波形和困意分析
+      const primarySamples = decoded.eeg['TP9'] ?? decoded.eeg['AF7'] ?? allSamples;
+      if (primarySamples.length > 0) {
+        processThetaWave(primarySamples);
+        const { theta, alpha } = analyzeFrequency(primarySamples);
+        analyzeDrowsiness(theta, alpha);
+      }
+
+      setPacketsRx(prev => prev + 1);
+    }
+
+    // ── 3. PPG 处理 + 心率计算 ───────────────────────────────
+    if (decoded.hasPPG && decoded.ppg.length > 0) {
+      const bpm = hrCalcRef.current.push(decoded.ppg);
+      if (bpm !== null) {
+        // 节流：每 2 秒最多更新一次心率
+        if (now - lastHRTime.current > 2000) {
+          lastHRTime.current = now;
+          setHeartRate(bpm);
+          if (pktNum % 100 === 0) {
+            addLog(`❤️ 心率: ${bpm} BPM (PPG ${decoded.ppg.length}个样本)`);
           }
-
-          processThetaWave(samples);
-          // 频域分析
-          const { theta, alpha } = analyzeFrequency(samples);
-          analyzeDrowsiness(theta, alpha);
-
-          setPacketsRx(prev => prev + 1);
         }
-      } catch (e) {
-        addLog(`❌ [${channel}] 解码失败: ${e}`);
       }
     }
   };
@@ -570,7 +587,7 @@ export default function App() {
         const uri = `${FileSystem.documentDirectory}${fileName}`;
 
         // 写入文件头
-        const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: 全量原始包 (p1035模式, 256Hz, 所有通道混合在ch=0013)\n格式: 时间 | ch=通道 | sig=信号分(频段) | Base64原始数据\n${'='.repeat(60)}\n`;
+        const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: p1035模式 EEG 256Hz (7通道) + PPG 64Hz\n格式: 时间 | ch=通道 | type=包类型 | sig=信号分 | hr=心率BPM | Base64原始数据\n${'='.repeat(60)}\n`;
         // @ts-ignore
         await FileSystem.writeAsStringAsync(uri, header, { encoding: FileSystem.EncodingType.UTF8 });
         logFileUri.current = uri;
@@ -629,6 +646,9 @@ export default function App() {
       }
       logFileUri.current = null;
 
+      // 重置心率计算器
+      hrCalcRef.current.reset();
+      setHeartRate(null);
       // 停止前台服务和CPU唤醒锁
       stopForegroundCapture();
     }
@@ -1053,6 +1073,24 @@ export default function App() {
               {packetsRx < 1000 ? `${packetsRx}包` : `${(packetsRx / 1000).toFixed(1)}k包`}
             </Text>
           )}
+        </View>
+      </View>
+
+      {/* 心率显示 */}
+      <View style={[s.card, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
+        <View>
+          <Text style={s.cardTitle}>❤️ 实时心率</Text>
+          <Text style={{ fontSize: 11, color: '#555' }}>PPG 峰值检测（需 3 秒以上 PPG 数据）</Text>
+        </View>
+        <View style={{ alignItems: 'flex-end' }}>
+          <Text style={{
+            fontSize: 36, fontWeight: '800',
+            color: heartRate ? '#FF6B6B' : '#444',
+            letterSpacing: -1,
+          }}>
+            {heartRate ?? '--'}
+          </Text>
+          <Text style={{ fontSize: 12, color: '#555' }}>BPM</Text>
         </View>
       </View>
 
