@@ -62,7 +62,7 @@ export default function DataCaptureControl() {
                 </Text>
                 <Text style={s.sliderHint}>
                     ⚡ 高速：EEG 256Hz + PPG，头环约 4–5 小时{'\n'}
-                    🌙 之后自动切低功耗模式：EEG ~50Hz，头环可坚持一整晚
+                    🌙 之后自动切低功耗/睡眠模式：头环 p1034，更省电可坚持一整晚
                 </Text>
                 <View style={s.optRow}>
                     {DENSE_OPTIONS.map(v => (
@@ -81,7 +81,7 @@ export default function DataCaptureControl() {
                     <Text style={s.modeBadgeText}>
                         {samplingMode === 'dense'
                             ? `⚡ 高速采集中 · 头环 p1035（256Hz）`
-                            : '🌙 低功耗采集中 · 头环 p21（~50Hz）'}
+                            : '🌙 低功耗采集中 / 睡眠模式 · 头环 p1034'}
                     </Text>
                 </View>
             )}

@@ -30,7 +30,7 @@ const PPG_CHANNELS = ['273e0010', '273e0011']
 
 const CMD_HALT = 'AmgK';
 const CMD_PRESET_HI = 'BnAxMDM1Cg==';
-const CMD_PRESET_LO = 'BHAyMQo=';
+const CMD_PRESET_LO = 'BnAxMDM0Cg=='; // p1034, sleep mode
 const CMD_START = 'BmRjMDAxCg==';
 const CMD_STATUS = 'AnMK';
 
@@ -311,16 +311,17 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
         if (decoded.hasEEG) {
             let allSamples: number[] = [];
-            for (const [chName, samples] of Object.entries(decoded.eeg)) {
+            for (const [chName, rawSamples] of Object.entries(decoded.eeg)) {
+                const samples = rawSamples as number[];
                 if (!samples || samples.length === 0) continue;
                 const buf = eegBufRef.current[chName];
                 if (buf) {
                     buf.push(...samples);
                     if (buf.length > 512) buf.splice(0, buf.length - 512);
                 }
-                allSamples = allSamples.concat(samples as number[]);
+                allSamples = allSamples.concat(samples);
             }
-            const primarySamples = decoded.eeg['TP9'] ?? decoded.eeg['AF7'] ?? allSamples;
+            const primarySamples = (decoded.eeg['TP9'] as number[]) ?? (decoded.eeg['AF7'] as number[]) ?? allSamples;
             if (primarySamples.length > 0) {
                 processThetaWave(primarySamples);
                 const { theta, alpha } = analyzeFrequency(primarySamples);
@@ -395,7 +396,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
                 const fileName = `muse_data_${timeStr}.txt`;
                 const uri = `${FileSystem.documentDirectory}${fileName}`;
-                const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: p1035模式 EEG 256Hz (7通道) + PPG 64Hz\n格式: 时间 | ch=通道 | type=包类型 | sig=信号分 | hr=心率BPM | Base64原始数据\n${'='.repeat(60)}\n`;
+                const modeStr = samplingMode === 'dense' ? 'p1035模式 EEG 256Hz (7通道) + PPG 64Hz' : 'p1034模式 低功耗 (睡眠预设)';
+                const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: ${modeStr}\n格式: 时间 | ch=通道 | type=包类型 | sig=信号分 | hr=心率BPM | Base64原始数据\n${'='.repeat(60)}\n`;
                 await FileSystem.writeAsStringAsync(uri, header, { encoding: FileSystem.EncodingType.UTF8 });
                 logFileUri.current = uri;
                 setSavePath(fileName);
@@ -449,6 +451,14 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         await write(device, CMD_START);
         await sleep(150);
         await write(device, CMD_START);
+
+        // 如果正在保存数据，向文件中注入一条模式切换日志
+        if (isSavingRef.current && logFileUri.current) {
+            const timestamp = new Date().toISOString();
+            fileBuffer.current += `${timestamp} | ch=SYS | type=MODE_SWITCH | sig=0 | hr=-- | === Switched to LOW POWER (p1034) ===\n`;
+            saveRowCount.current += 1;
+            if (fileBuffer.current.length > BUFFER_FLUSH_THRESHOLD) flushBufferToFile();
+        }
     };
 
     const startAdaptiveSampling = (device: Device, denseMinutes: number) => {
@@ -488,8 +498,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 setTimeout(resolve, 2000);
             });
             await sendCmd(CMD_HALT);
-            await sendCmd(CMD_PRESET_HI);
-            setSamplingMode('dense');
+
+            // Reconnect 时，尊重当前的 samplingMode
+            // 如果是因为 denseMins 到了而变成了 sparse，重连后保持 sparse
+            if (samplingMode === 'dense') {
+                await sendCmd(CMD_PRESET_HI);
+            } else {
+                await sendCmd(CMD_PRESET_LO);
+            }
+
             [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
                 device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
                     if (error) return;
@@ -502,7 +519,11 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             if (heartbeat.current) clearInterval(heartbeat.current);
             setTimeout(() => write(device, CMD_STATUS), 2000);
             heartbeat.current = setInterval(() => write(device, CMD_STATUS), 30000);
-            startAdaptiveSampling(device, denseMins);
+
+            // 重新开始自适应采样逻辑（如果在 dense 状态）
+            if (samplingMode === 'dense') {
+                startAdaptiveSampling(device, denseMins);
+            }
         } catch { }
     };
 
