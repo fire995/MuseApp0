@@ -3,7 +3,7 @@ import { Platform, AppState, PermissionsAndroid, Linking } from 'react-native';
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import TrackPlayer, { Capability, AppKilledPlaybackBehavior } from 'react-native-track-player';
+import TrackPlayer, { Capability, AppKilledPlaybackBehavior, RepeatMode } from 'react-native-track-player';
 import * as DocumentPicker from '@react-native-documents/picker';
 // @ts-ignore
 import * as FileSystem from 'expo-file-system/legacy';
@@ -145,8 +145,10 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         ['TP9', 'AF7', 'AF8', 'TP10'].forEach((ch: string) => { newUIQuality[ch] = softwareRawRef.current[ch] || 0; });
         setElectrodeQuality(newUIQuality);
 
-        const softValues = Object.values(softwareRawRef.current).filter(v => v > 0);
-        const avgSoft = softValues.length > 0 ? softValues.reduce((a, b) => a + b, 0) / softValues.length : 0;
+        // 仅计算核心 4 通道的平均值作为总得分
+        const mainChannels = ['TP9', 'AF7', 'AF8', 'TP10'];
+        const values = mainChannels.map(ch => softwareRawRef.current[ch] || 0);
+        const avgSoft = values.reduce((a, b) => a + b, 0) / values.length;
         let finalScore = Math.round(avgSoft);
 
         const now = Date.now();
@@ -174,6 +176,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                     android: { appKilledPlaybackBehavior: AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification },
                     capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
                 });
+                await TrackPlayer.setRepeatMode(RepeatMode.Track);
             } catch { }
         };
         setupMusicPlayer();
@@ -377,13 +380,34 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             });
             await activateKeepAwakeAsync('muse-ble-lock');
         }
+
+        try {
+            if (!isPlaying) {
+                const silenceAsset = require('../../assets/silence.wav');
+                await TrackPlayer.reset();
+                await TrackPlayer.add({
+                    id: 'keep_alive_silence',
+                    url: silenceAsset,
+                    title: '后台保活',
+                    artist: '系统',
+                });
+                await TrackPlayer.setRepeatMode(RepeatMode.Track);
+                await TrackPlayer.play();
+            }
+        } catch { }
     };
 
-    const stopForegroundCapture = () => {
+    const stopForegroundCapture = async () => {
         if (Platform.OS === 'android') {
             ReactNativeForegroundService.stop();
             deactivateKeepAwake('muse-ble-lock');
         }
+
+        try {
+            if (!isPlaying) {
+                await TrackPlayer.stop();
+            }
+        } catch { }
     };
 
     const toggleSave = async () => {

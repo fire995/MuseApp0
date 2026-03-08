@@ -68,10 +68,17 @@ export default function SignalQualityCard() {
 
     const SIG = SIGNAL_CONFIG[signalLevel] || SIGNAL_CONFIG.none;
     const channels = ['TP9', 'AF7', 'AF8', 'TP10'] as const;
-    const goodCount = Object.values(electrodeQuality).filter(v => v >= 65).length;
+    const goodCount = channels.filter(ch => (electrodeQuality[ch] || 0) >= 65).length;
+    const badChannels = channels.filter(ch => (electrodeQuality[ch] || 0) < 65 && packetsRx > 0).map(ch => CHANNEL_LABELS[ch]);
 
     const dataFlowColor = packetsRx > 0 ? '#00E676' : '#FF5252';
     const dataFlowLabel = packetsRx > 0 ? '✓ 数据接收中' : '✗ 无数据';
+
+    // 动态提示用户具体哪个电极没戴好
+    let displayTip = SIG.tip;
+    if (badChannels.length > 0 && packetsRx > 0) {
+        displayTip = `需调整: ${badChannels.join('、')}贴合情况`;
+    }
 
     return (
         <View style={[s.sigCard, { borderColor: SIG.color }]}>
@@ -85,6 +92,7 @@ export default function SignalQualityCard() {
                         const color = getChannelColor(score);
                         return (
                             <View key={ch} style={s.hsChannel}>
+                                <Text style={{ fontSize: 9, color: '#aaa' }}>{CHANNEL_LABELS[ch]}</Text>
                                 <View style={[s.hsDot, {
                                     backgroundColor: color,
                                     borderWidth: score > 0 ? 0 : 1,
@@ -103,7 +111,7 @@ export default function SignalQualityCard() {
             <View style={{ flex: 1 }}>
                 <Text style={[s.sigLabel, { color: SIG.color }]}>{SIG.label}</Text>
                 {SIG.desc ? <Text style={s.sigDesc}>{SIG.desc}</Text> : null}
-                {SIG.tip ? <Text style={s.sigTip}>💡 {SIG.tip}</Text> : null}
+                {displayTip ? <Text style={[s.sigTip, badChannels.length > 0 ? { color: '#FFCA28', fontWeight: 'bold' } : {}]}>💡 {displayTip}</Text> : null}
                 <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
                     <Text style={{ fontSize: 10, color: '#777' }}>
                         佩戴: {goodCount}/4
@@ -145,10 +153,10 @@ const s = StyleSheet.create({
         backgroundColor: '#1A1D27',
     },
     sigDot: { width: 10, height: 10, borderRadius: 5 },
-    horseshoe: { flexDirection: 'row', gap: 2 },
-    hsChannel: { alignItems: 'center', gap: 1 },
-    hsDot: { width: 8, height: 8, borderRadius: 4 },
-    hsLabel: { fontSize: 7, fontWeight: '600' },
+    horseshoe: { flexDirection: 'row', gap: 6 },
+    hsChannel: { alignItems: 'center', gap: 2 },
+    hsDot: { width: 10, height: 10, borderRadius: 5 },
+    hsLabel: { fontSize: 9, fontWeight: '600' },
     sigLabel: { fontSize: 13, fontWeight: '700' },
     sigDesc: { fontSize: 11, color: '#666', marginTop: 2 },
     sigTip: { fontSize: 10, color: '#888', marginTop: 2, fontStyle: 'italic' },
