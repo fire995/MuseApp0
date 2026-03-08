@@ -51,8 +51,6 @@ interface MuseDeviceContextType {
     isSaving: boolean;
     savePath: string;
     saveDuration: number;
-    denseMins: number;
-    setDenseMins: (v: number) => void;
     heartRate: number | null;
     // 自动保存设置
     autoSaveEnabled: boolean;
@@ -98,7 +96,6 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
     const [savePath, setSavePath] = useState('');
     const [saveDuration, setSaveDuration] = useState(0);
-    const [denseMins, setDenseMins] = useState(30);
     const [heartRate, setHeartRate] = useState<number | null>(null);
 
     // 自动保存设置（从 AsyncStorage 加载，默认值）
@@ -466,20 +463,14 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         } catch { }
     };
 
-    const write = (device: Device, cmd: string) => device.writeCharacteristicWithoutResponseForService(MUSE_SERVICE, MUSE_CONTROL, cmd).catch(() => { });
+    const write = (device: Device, cmd: string) => Promise.resolve(); // 被动接收，不发送控制指令
 
     const switchToLowPower = async (device: Device) => {
         setSamplingMode('sparse');
-        await write(device, CMD_PRESET_LO);
-        await sleep(300);
-        await write(device, CMD_START);
-        await sleep(150);
-        await write(device, CMD_START);
-
-        // 如果正在保存数据，向文件中注入一条模式切换日志
+        // 不再发送控制指令
         if (isSavingRef.current && logFileUri.current) {
             const timestamp = new Date().toISOString();
-            fileBuffer.current += `${timestamp} | ch=SYS | type=MODE_SWITCH | sig=0 | hr=-- | === Switched to LOW POWER (p1034) ===\n`;
+            fileBuffer.current += `${timestamp} | ch=SYS | type=MODE_SWITCH | sig=0 | hr=-- | === Switched to LOW POWER (passive) ===\n`;
             saveRowCount.current += 1;
             if (fileBuffer.current.length > BUFFER_FLUSH_THRESHOLD) flushBufferToFile();
         }
@@ -517,37 +508,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const bpMatch = txt.match(/"bp"\s*:\s*([\d.]+)/);
                 if (bpMatch) { setBattery(Math.round(parseFloat(bpMatch[1]))); }
             });
-            const sendCmd = (b64: string) => new Promise<void>(resolve => {
-                write(device, b64);
-                setTimeout(resolve, 2000);
-            });
-            await sendCmd(CMD_HALT);
 
-            // Reconnect 时，尊重当前的 samplingMode
-            // 如果是因为 denseMins 到了而变成了 sparse，重连后保持 sparse
-            if (samplingMode === 'dense') {
-                await sendCmd(CMD_PRESET_HI);
-            } else {
-                await sendCmd(CMD_PRESET_LO);
-            }
-
+            // 被动监听数据，不再主动发送 CMD_HALT, CMD_PRESET 等指令
             [...ATHENA_CHANNELS, ...PPG_CHANNELS].forEach(uuid => {
                 device.monitorCharacteristicForService(MUSE_SERVICE, uuid, (error, char) => {
                     if (error) return;
                     if (char?.value) handleMuseDataPacket(uuid.substring(4, 8), char.value);
                 });
             });
-            await write(device, CMD_START);
-            await sleep(150);
-            await write(device, CMD_START);
-            if (heartbeat.current) clearInterval(heartbeat.current);
-            setTimeout(() => write(device, CMD_STATUS), 2000);
-            heartbeat.current = setInterval(() => write(device, CMD_STATUS), 30000);
 
-            // 重新开始自适应采样逻辑（如果在 dense 状态）
-            if (samplingMode === 'dense') {
-                startAdaptiveSampling(device, denseMins);
-            }
         } catch { }
     };
 
@@ -699,7 +668,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     return (
         <MuseDeviceContext.Provider value={{
             battery, signalLevel, signalScore, electrodeQuality, packetsRx, samplingMode, savedDeviceId, thetaWave,
-            isPlaying, musicName, isSaving, savePath, saveDuration, denseMins, setDenseMins, heartRate,
+            isPlaying, musicName, isSaving, savePath, saveDuration, heartRate,
             autoSaveEnabled, setAutoSaveEnabled,
             autoSaveIntervalSec, setAutoSaveIntervalSec,
             autoSaveRetainDays, setAutoSaveRetainDays,

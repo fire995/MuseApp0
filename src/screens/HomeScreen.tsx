@@ -1,9 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { useMuseDevice } from '../contexts/MuseDeviceContext';
-import SignalQualityCard from '../components/SignalQualityCard';
-import LiveWaveform from '../components/LiveWaveform';
-import HeartRateDisplay from '../components/HeartRateDisplay';
 import DeviceConnection from '../components/DeviceConnection';
 
 export default function HomeScreen() {
@@ -22,9 +19,6 @@ export default function HomeScreen() {
                 </View>
             </View>
 
-            <SignalQualityCard />
-            <LiveWaveform />
-            <HeartRateDisplay />
             <DeviceConnection />
         </ScrollView>
     );
