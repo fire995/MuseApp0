@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { useProgress } from 'react-native-track-player';
+import TrackPlayer, { useProgress } from 'react-native-track-player';
+import Slider from '@react-native-community/slider';
 import { useMuseDevice } from '../contexts/MuseDeviceContext';
 
 const ProgressBar = () => {
@@ -11,9 +12,18 @@ const ProgressBar = () => {
     return (
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 12, gap: 8 }}>
             <Text style={s.timeText}>{fmt(position)}</Text>
-            <View style={s.barTrack}>
-                <View style={[s.barFill, { width: `${pct}%`, backgroundColor: '#3498DB' }]} />
-            </View>
+            <Slider
+                style={s.slider}
+                minimumValue={0}
+                maximumValue={duration > 0 ? duration : 1}
+                value={position}
+                minimumTrackTintColor="#3498DB"
+                maximumTrackTintColor="#2A2D3A"
+                thumbTintColor="#3498DB"
+                onSlidingComplete={async (val) => {
+                    await TrackPlayer.seekTo(val);
+                }}
+            />
             <Text style={[s.timeText, { textAlign: 'right' }]}>{fmt(duration)}</Text>
         </View>
     );
@@ -52,6 +62,5 @@ const s = StyleSheet.create({
     btnRed: { backgroundColor: '#E74C3C' },
     btnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
     timeText: { color: '#888', fontSize: 11, width: 34 },
-    barTrack: { flex: 1, height: 4, backgroundColor: '#2A2D3A', borderRadius: 2, overflow: 'hidden' },
-    barFill: { height: '100%', borderRadius: 2 },
+    slider: { flex: 1, height: 40 },
 });
