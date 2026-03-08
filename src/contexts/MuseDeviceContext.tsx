@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
-import { Platform, AppState, PermissionsAndroid, Linking } from 'react-native';
+import { Platform, AppState, PermissionsAndroid, Linking, Alert } from 'react-native';
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -8,6 +8,7 @@ import * as DocumentPicker from '@react-native-documents/picker';
 // @ts-ignore
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+import { zip } from 'react-native-zip-archive';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
@@ -300,10 +301,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         } catch (e) { return; }
 
         if (isSavingRef.current && logFileUri.current) {
-            const sig = signalBuf.current.length > 0 ? signalBuf.current[signalBuf.current.length - 1] : 0;
-            const hrStr = heartRate != null ? `hr=${heartRate}` : 'hr=--';
             const timestamp = new Date().toISOString();
-            const line = `${timestamp} | ch=${channel} | type=${decoded.packetTypeName} | sig=${sig} | ${hrStr} | ${base64Data}\n`;
+            const line = `${timestamp} | ch=${channel} | type=${decoded.packetTypeName} | ${base64Data}\n`;
             fileBuffer.current += line;
             saveRowCount.current += 1;
             if (fileBuffer.current.length > BUFFER_FLUSH_THRESHOLD) flushBufferToFile();
@@ -417,8 +416,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
                 const fileName = `muse_data_${timeStr}.txt`;
                 const uri = `${FileSystem.documentDirectory}${fileName}`;
-                const modeStr = samplingMode === 'dense' ? 'p1035模式 EEG 256Hz (7通道) + PPG 64Hz' : 'p1034模式 低功耗 (睡眠预设)';
-                const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: ${modeStr}\n格式: 时间 | ch=通道 | type=包类型 | sig=信号分 | hr=心率BPM | Base64原始数据\n${'='.repeat(60)}\n`;
+                const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: 被动跟随模式(官方App接管)\n格式: 时间 | ch=通道 | type=包类型 | Base64原始数据\n${'='.repeat(60)}\n`;
                 await FileSystem.writeAsStringAsync(uri, header, { encoding: FileSystem.EncodingType.UTF8 });
                 logFileUri.current = uri;
                 setSavePath(fileName);
@@ -453,14 +451,42 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             await flushBufferToFile();
             const documentDir = FileSystem.documentDirectory;
             if (!documentDir) return;
+
             const files = await FileSystem.readDirectoryAsync(documentDir);
             const dataFiles = files.filter(f => (f.startsWith('muse_log_') || f.startsWith('muse_data_')) && f.endsWith('.txt'));
-            if (dataFiles.length === 0) return;
-            const latestFile = dataFiles.sort().reverse()[0];
-            const fileUri = `${documentDir}${latestFile}`;
-            const fileInfo = await FileSystem.getInfoAsync(fileUri);
-            if (fileInfo.exists) { await Sharing.shareAsync(fileUri); }
-        } catch { }
+
+            if (dataFiles.length === 0) {
+                Alert.alert('提示', '暂无数据文件可导出。');
+                return;
+            }
+
+            // 聚合当前所有的临时日志文件，压成一个整的 zip 文件！
+            const exportFolder = `${documentDir}temp_export/`;
+            const exportInfo = await FileSystem.getInfoAsync(exportFolder);
+            if (exportInfo.exists) {
+                await FileSystem.deleteAsync(exportFolder, { idempotent: true });
+            }
+            await FileSystem.makeDirectoryAsync(exportFolder, { intermediates: true });
+
+            for (const f of dataFiles) {
+                await FileSystem.copyAsync({
+                    from: documentDir + f,
+                    to: exportFolder + f
+                });
+            }
+
+            const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+            const zipPath = `${documentDir}MuseData_Export_${timeStr}.zip`;
+
+            await zip(exportFolder, zipPath);
+            await FileSystem.deleteAsync(exportFolder, { idempotent: true }); // 清理临时合并文件夹
+
+            await Sharing.shareAsync(zipPath, { dialogTitle: '导出 Muse 完整采集包' });
+
+        } catch (e) {
+            console.error('Export error: ', e);
+            Alert.alert('导出失败', '无法完成文件的合并压缩与导出。');
+        }
     };
 
     const write = (device: Device, cmd: string) => Promise.resolve(); // 被动接收，不发送控制指令
@@ -470,7 +496,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         // 不再发送控制指令
         if (isSavingRef.current && logFileUri.current) {
             const timestamp = new Date().toISOString();
-            fileBuffer.current += `${timestamp} | ch=SYS | type=MODE_SWITCH | sig=0 | hr=-- | === Switched to LOW POWER (passive) ===\n`;
+            fileBuffer.current += `${timestamp} | ch=SYS | type=MODE_SWITCH | === Passive logging active ===\n`;
             saveRowCount.current += 1;
             if (fileBuffer.current.length > BUFFER_FLUSH_THRESHOLD) flushBufferToFile();
         }

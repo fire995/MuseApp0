@@ -91,12 +91,22 @@ export default function DataCaptureControl() {
             ) : null}
 
             {!isSaving && savePath ? (
-                <TouchableOpacity
-                    style={s.exportBtn}
-                    onPress={exportSavedFile}>
-                    <Text style={s.btnText}>📤 导出数据文件</Text>
-                </TouchableOpacity>
+                <>
+                    <TouchableOpacity
+                        style={s.exportBtn}
+                        onPress={exportSavedFile}>
+                        <Text style={s.btnText}>📤 导出当前所有会话数据 (.zip)</Text>
+                    </TouchableOpacity>
+                    <Text style={[s.savePath, { marginTop: 8 }]}>所有分段保存的 txt 都会自动打包在一个 zip 里。为了持久保存，点击上方按钮通过微信等保存至想要的文件夹。</Text>
+                </>
             ) : null}
+
+            <View style={s.warningBox}>
+                <Text style={s.warningText}>
+                    ⚠️ 保持后台采集请注意：因为仅作被动监听收发数据，极其容易被安卓系统杀后台！
+                    强烈建议去手机设置中开启【允许完全后台行为】、【无限制使用电池】，以及打开【悬浮窗】权限来防杀。
+                </Text>
+            </View>
         </View>
     );
 }
@@ -135,4 +145,8 @@ const s = StyleSheet.create({
     },
     progressFill: { height: 4, backgroundColor: '#4CAF50', borderRadius: 2 },
     lastFlushText: { fontSize: 10, color: '#4a7a5a' },
+    warningBox: {
+        marginTop: 15, padding: 10, backgroundColor: '#2b1b1b', borderRadius: 8, borderWidth: 1, borderColor: '#522b2b'
+    },
+    warningText: { fontSize: 11, color: '#e07a7a', lineHeight: 16 }
 });

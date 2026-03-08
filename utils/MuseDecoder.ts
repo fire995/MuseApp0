@@ -118,24 +118,21 @@ export function parseMusePacket(base64Data: string, channelId: string): DecodedP
   const typeByte = buf[0];
 
   // 关键修复：当 packet length <= 20 时，通常是因为手机 MTU 没调整好被截断，或者是头环发送的 Legacy 数据（旧模式）。
-  // 这个时候，buf[0] 只不过是自增的包序号的第一个字节（比如 0xDF, 0xF4... 纯属巧合），
-  // 如果直接按包类型处理就会导致全部报错或者数据空白。
+  // 如果大包 (length > 20)，无论是 0xDF、0xDB 还是其他变体（如 0xE5, 0xEC），都应当作混合包解析。
   if (buf.length > 20) {
-    if (typeByte === 0xDF) {
-      // ── 0xDF: EEG + PPG 混合包（p1035 模式核心包型）──────────────
-      result.packetTypeName = 'EEG_PPG';
-      _decode_DF(buf, result);
-      return result;
-    } else if (typeByte === 0xF4) {
+    if (typeByte === 0xF4) {
       // ── 0xF4: IMU 包（本次暂不解码，留作后续）───────────────────
       result.packetTypeName = 'IMU';
       return result;
-    } else if (typeByte === 0xDB || typeByte === 0xD9) {
-      // ── 0xDB/0xD9: 混合包，尝试通用解析 ──────────────────────
-      result.packetTypeName = typeByte === 0xDB ? 'MIXED_DB' : 'MIXED_D9';
-      _decode_generic(buf.slice(4), result);
-      return result;
     }
+
+    result.packetTypeName = typeByte === 0xDF ? 'EEG_PPG_DF' : `MIXED_${typeByte.toString(16).toUpperCase()}`;
+    _decode_DF(buf, result);
+
+    if (!result.hasEEG && !result.hasPPG && typeByte !== 0xDF) {
+      _decode_generic(buf.slice(4), result);
+    }
+    return result;
   }
 
   // ── 传统独立通道包（ch=0013~0016，按 20 字节标准格式）─────
