@@ -8,7 +8,7 @@ import * as DocumentPicker from '@react-native-documents/picker';
 // @ts-ignore
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { zip } from 'react-native-zip-archive';
+import JSZip from 'jszip';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
@@ -109,6 +109,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const autoSaveRetainDaysRef = useRef(7);
 
     const logFileUri = useRef<string | null>(null);
+    const saveStartTimeRef = useRef<number>(0);
     const fileBuffer = useRef<string>('');
     const filePartIndex = useRef<number>(1);
     const deviceRef = useRef<Device | null>(null);
@@ -363,18 +364,24 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
     const startForegroundCapture = async () => {
         if (Platform.OS === 'android') {
-            await ReactNativeForegroundService.start({
-                id: 144,
-                title: 'Muse BCI 采集中',
-                message: '正在后台接收并存储脑波数据...',
-                icon: 'ic_launcher',
-                setOnlyAlertOnce: "true",
-                color: '#000000',
-                visibility: 'public',
-                // @ts-ignore
-                ServiceType: 'connectedDevice' as any,
-            });
-            await activateKeepAwakeAsync('muse-ble-lock');
+            try {
+                await ReactNativeForegroundService.start({
+                    id: 144,
+                    title: 'Muse BCI 采集中',
+                    message: '正在后台接收并存储脑波数据...',
+                    icon: 'ic_launcher',
+                    setOnlyAlertOnce: "true",
+                    color: '#000000',
+                    visibility: 'public',
+                    // @ts-ignore
+                    ServiceType: 'connectedDevice' as any,
+                });
+            } catch (e) {
+                console.log('Foreground service start failed, fallback to audio keep-alive:', e);
+            }
+            try {
+                await activateKeepAwakeAsync('muse-ble-lock');
+            } catch (e) { }
         }
 
         try {
@@ -423,8 +430,11 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             } catch (e) { setIsSaving(false); return; }
 
             setSaveDuration(0);
+            saveStartTimeRef.current = Date.now();
             if (saveDurationTimerRef.current) clearInterval(saveDurationTimerRef.current);
-            saveDurationTimerRef.current = setInterval(() => { setSaveDuration(prev => prev + 1); }, 1000);
+            saveDurationTimerRef.current = setInterval(() => {
+                setSaveDuration(Math.floor((Date.now() - saveStartTimeRef.current) / 1000));
+            }, 1000);
             startForegroundCapture();
 
             if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
@@ -460,26 +470,19 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 return;
             }
 
-            // 聚合当前所有的临时日志文件，压成一个整的 zip 文件！
-            const exportFolder = `${documentDir}temp_export/`;
-            const exportInfo = await FileSystem.getInfoAsync(exportFolder);
-            if (exportInfo.exists) {
-                await FileSystem.deleteAsync(exportFolder, { idempotent: true });
-            }
-            await FileSystem.makeDirectoryAsync(exportFolder, { intermediates: true });
+            // 使用纯 JS 构建 Zip，防止未提前构建包含 Native 模块的自定义安装包导致奔溃
+            const zip = new JSZip();
 
             for (const f of dataFiles) {
-                await FileSystem.copyAsync({
-                    from: documentDir + f,
-                    to: exportFolder + f
-                });
+                const content = await FileSystem.readAsStringAsync(documentDir + f, { encoding: FileSystem.EncodingType.UTF8 });
+                zip.file(f, content);
             }
 
             const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
             const zipPath = `${documentDir}MuseData_Export_${timeStr}.zip`;
 
-            await zip(exportFolder, zipPath);
-            await FileSystem.deleteAsync(exportFolder, { idempotent: true }); // 清理临时合并文件夹
+            const zipBase64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
+            await FileSystem.writeAsStringAsync(zipPath, zipBase64, { encoding: FileSystem.EncodingType.Base64 });
 
             await Sharing.shareAsync(zipPath, { dialogTitle: '导出 Muse 完整采集包' });
 
