@@ -345,32 +345,127 @@ export function analyzeFrequency(samples: number[]): { theta: number; alpha: num
   } catch { return { theta: 0, alpha: 0 }; }
 }
 
+/**
+ * 多维度信号质量评估算法
+ *
+ * 参考开源项目实现：
+ *  - muse-lsl: 通过方差/标准差判断信号合理性
+ *  - BrainFlow SDK: std + 饱和 + 平坦 + 幅度综合检测
+ *  - Mind Monitor (HSI): 电极接触质量 1(好)/2(中)/4(差)
+ *  - 学术论文 (NIH): variance per second 法
+ *
+ * 5 个检测维度及权重：
+ *  1. 标准差检测 (40%) — 标准差在 3~80μV 范围为正常脑波
+ *  2. 幅度范围检测 (20%) — 峰峰值在 5~200μV 范围为正常
+ *  3. 饱和检测 (15%) — ADC 接近满量程说明电极不良
+ *  4. 平坦检测 (15%) — 连续相同值说明电极脱落
+ *  5. 频谱合理性 (10%) — 脑波频段 1-40Hz 能量占比
+ */
 export function calculateSignalQuality(samples: number[]): number {
-  if (samples.length < 128) return 50;
+  if (samples.length < 32) return 0; // 不足32个样本无法判断
+
   try {
-    const fftSize = Math.min(256, Math.pow(2, Math.floor(Math.log2(samples.length))));
-    const fft = new FFT(fftSize);
-    const input = samples.slice(-fftSize);
-    const mean = input.reduce((a: number, b: number) => a + b, 0) / input.length;
-    const normalized = input.map((v: number) => v - mean);
+    const data = samples.slice(-256); // 取最后 256 个样本（1 秒窗口 @256Hz）
+    const N = data.length;
+
+    // ── 1. 标准差检测 (权重 40%) ──────────────────────────────
+    // 正常 EEG 信号标准差约 3~80 μV
+    const mean = data.reduce((a, b) => a + b, 0) / N;
     let sumSq = 0;
-    for (const v of normalized) sumSq += v * v;
-    if (Math.sqrt(sumSq / fftSize) < 0.5) return 0;
-    const out = fft.createComplexArray();
-    fft.realTransform(out, normalized);
-    const freqRes = EEG_SAMPLE_RATE / fftSize;
-    let brainPower = 0, totalPower = 0;
-    for (let bin = 0; bin < out.length / 2; bin += 2) {
-      const freq = (bin / 2) * freqRes;
-      if (freq < 1) continue;
-      const p = out[bin] * out[bin] + out[bin + 1] * out[bin + 1];
-      totalPower += p;
-      if (freq <= 30) brainPower += p;
+    for (const v of data) { const d = v - mean; sumSq += d * d; }
+    const std = Math.sqrt(sumSq / N);
+
+    let stdScore: number;
+    if (std < 0.5) stdScore = 0;   // 几乎无信号 → 电极未接触
+    else if (std < 2.0) stdScore = 20;  // 信号太弱
+    else if (std < 3.0) stdScore = 50;  // 信号偏弱
+    else if (std <= 80) stdScore = 100; // 正常脑波范围
+    else if (std <= 150) stdScore = 40;  // 可能有运动伪迹
+    else stdScore = 10;  // 严重噪声/接触不良
+
+    // ── 2. 幅度范围检测 (权重 20%) ────────────────────────────
+    // 正常 EEG 峰峰值约 5~200 μV
+    let vmin = data[0], vmax = data[0];
+    for (const v of data) { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+    const peakToPeak = vmax - vmin;
+
+    let ampScore: number;
+    if (peakToPeak < 1) ampScore = 0;   // 完全平坦
+    else if (peakToPeak < 5) ampScore = 30;  // 信号偏弱
+    else if (peakToPeak <= 200) ampScore = 100; // 正常范围
+    else if (peakToPeak <= 400) ampScore = 50;  // 幅度偏大
+    else ampScore = 10;  // 严重饱和/噪声
+
+    // ── 3. 饱和检测 (权重 15%) ─────────────────────────────────
+    // ADC 12-bit 满量程 ±1000μV, 超过 ±450μV 视为接近饱和
+    let satCount = 0;
+    for (const v of data) { if (Math.abs(v) > 450) satCount++; }
+    const satRatio = satCount / N;
+
+    let satScore: number;
+    if (satRatio > 0.15) satScore = 0;   // 大量饱和
+    else if (satRatio > 0.05) satScore = 40;  // 部分饱和
+    else if (satRatio > 0.01) satScore = 70;  // 少量饱和
+    else satScore = 100; // 无饱和 ✓
+
+    // ── 4. 平坦检测 (权重 15%) ─────────────────────────────────
+    // 连续样本差值极小 → 电极脱落或数据中断
+    let flatCount = 0;
+    for (let i = 1; i < N; i++) {
+      if (Math.abs(data[i] - data[i - 1]) < 0.05) flatCount++;
     }
-    if (totalPower < 0.001) return 0;
-    const ratio = brainPower / totalPower;
-    if (ratio >= 0.6) return 100;
-    if (ratio <= 0.15) return 0;
-    return Math.max(0, Math.min(100, Math.round(((ratio - 0.15) / 0.45) * 100)));
-  } catch { return 50; }
+    const flatRatio = flatCount / (N - 1);
+
+    let flatScore: number;
+    if (flatRatio > 0.7) flatScore = 0;   // 大面积平坦 → 无信号
+    else if (flatRatio > 0.4) flatScore = 20;  // 较多平坦
+    else if (flatRatio > 0.2) flatScore = 60;  // 部分平坦
+    else flatScore = 100; // 正常 ✓
+
+    // ── 5. 频谱合理性 (权重 10%) ───────────────────────────────
+    // 简化版频域检测：正常 EEG 脑波频段 (1-40Hz) 能量占比应 > 30%
+    let spectralScore = 50; // 默认中等
+    const fftSize = Math.min(256, Math.pow(2, Math.floor(Math.log2(N))));
+    if (fftSize >= 32) {
+      try {
+        const fft = new FFT(fftSize);
+        const segment = data.slice(0, fftSize);
+        const segMean = segment.reduce((a: number, b: number) => a + b, 0) / fftSize;
+        const normalized = segment.map((v: number) => v - segMean);
+        const out = fft.createComplexArray();
+        fft.realTransform(out, normalized);
+        const freqRes = EEG_SAMPLE_RATE / fftSize;
+        let brainPower = 0, totalPower = 0;
+        for (let bin = 0; bin < out.length / 2; bin += 2) {
+          const freq = (bin / 2) * freqRes;
+          if (freq < 1) continue;
+          const p = out[bin] * out[bin] + out[bin + 1] * out[bin + 1];
+          totalPower += p;
+          if (freq >= 1 && freq <= 40) brainPower += p;
+        }
+        if (totalPower > 0.001) {
+          const ratio = brainPower / totalPower;
+          if (ratio >= 0.5) spectralScore = 100;
+          else if (ratio >= 0.3) spectralScore = 80;
+          else if (ratio >= 0.15) spectralScore = 40;
+          else spectralScore = 10;
+        } else {
+          spectralScore = 0;
+        }
+      } catch { /* 保留默认 50 */ }
+    }
+
+    // ── 加权求和 ───────────────────────────────────────────────
+    const finalScore = Math.round(
+      stdScore * 0.40 +
+      ampScore * 0.20 +
+      satScore * 0.15 +
+      flatScore * 0.15 +
+      spectralScore * 0.10
+    );
+
+    return Math.max(0, Math.min(100, finalScore));
+  } catch {
+    return 0; // 出错时返回 0 而非 50，避免误导
+  }
 }

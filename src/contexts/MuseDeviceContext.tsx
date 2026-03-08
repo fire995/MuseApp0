@@ -150,13 +150,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         let finalScore = Math.round(avgSoft);
 
         const now = Date.now();
-        if (lastDataTime.current === 0 || now - lastDataTime.current > 5000) {
+        // 3秒无数据 → 信号为0（比之前5秒更快检测断开）
+        if (lastDataTime.current === 0 || now - lastDataTime.current > 3000) {
             finalScore = 0;
         }
 
+        // 中位数滤波窗口从5缩小到3，让信号状态更快响应
         const buf = signalBuf.current;
         buf.push(finalScore);
-        if (buf.length > 5) buf.shift();
+        if (buf.length > 3) buf.shift();
         const sorted = [...buf].sort((a, b) => a - b);
         const mid = sorted[Math.floor(sorted.length / 2)];
 
@@ -215,15 +217,17 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             }
         }, 5000);
 
+        // 每 1 秒计算一次信号质量（比之前2秒更快更新）
         dataQualityTimer.current = setInterval(() => {
             if (lastDataTime.current === 0) return;
             for (const [chName, buf] of Object.entries(eegBufRef.current)) {
-                if (buf.length >= 64) {
+                // 新算法最少需要 32 个样本（之前要 64 个）
+                if (buf.length >= 32) {
                     softwareRawRef.current[chName] = calculateSignalQuality(buf);
                 }
             }
             recalcTotalSignal();
-        }, 2000);
+        }, 1000);
 
         return () => {
             if (heartbeat.current) clearInterval(heartbeat.current);
@@ -312,7 +316,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const buf = eegBufRef.current[chName];
                 if (buf) {
                     buf.push(...samples);
-                    if (buf.length > 256) buf.splice(0, buf.length - 256);
+                    if (buf.length > 512) buf.splice(0, buf.length - 512);
                 }
                 allSamples = allSamples.concat(samples as number[]);
             }
