@@ -8,7 +8,7 @@ import * as DocumentPicker from '@react-native-documents/picker';
 // @ts-ignore
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import JSZip from 'jszip';
+const JSZip = require('jszip');
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
