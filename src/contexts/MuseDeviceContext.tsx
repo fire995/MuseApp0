@@ -11,6 +11,7 @@ import * as Sharing from 'expo-sharing';
 import { zipSync, strToU8 } from 'fflate';
 import ReactNativeForegroundService from '@supersami/rn-foreground-service';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { Audio } from 'expo-av';
 import {
     parseMusePacket, analyzeFrequency, calculateSignalQuality,
     HeartRateCalculator, EEG_CHANNEL_NAMES,
@@ -133,6 +134,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const eegBufRef = useRef<Record<string, number[]>>(Object.fromEntries(EEG_CHANNEL_NAMES.map(ch => [ch, []])));
     const hrCalcRef = useRef(new HeartRateCalculator());
     const lastHRTime = useRef<number>(0);
+    const silentSoundRef = useRef<Audio.Sound | null>(null);
 
     // 日志方法简化为只输出到控制台
     const addLog = useCallback((msg: string) => {
@@ -348,6 +350,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const res = results[0];
                 await TrackPlayer.reset();
                 await TrackPlayer.add({ id: 'meditation', url: res.uri, title: res.name || '冥想音乐', artist: 'MuseApp' });
+                await TrackPlayer.setRepeatMode(RepeatMode.Off); // 冥想音乐播放完即停，不无限循环
                 setMusicName(res.name || '已加载');
                 await TrackPlayer.play();
                 setIsPlaying(true);
@@ -386,16 +389,23 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
         try {
             if (!isPlaying) {
-                const silenceAsset = require('../../assets/silence.wav');
-                await TrackPlayer.reset();
-                await TrackPlayer.add({
-                    id: 'keep_alive_silence',
-                    url: silenceAsset,
-                    title: '后台保活',
-                    artist: '系统',
-                });
-                await TrackPlayer.setRepeatMode(RepeatMode.Track);
-                await TrackPlayer.play();
+                if (!silentSoundRef.current) {
+                    const silenceAsset = require('../../assets/silence.wav');
+                    await Audio.setAudioModeAsync({
+                        playsInSilentModeIOS: true,
+                        staysActiveInBackground: true,
+                        shouldDuckAndroid: true,
+                    });
+                    const { sound } = await Audio.Sound.createAsync(
+                        silenceAsset,
+                        { isLooping: true, volume: 0.1 }
+                    );
+                    silentSoundRef.current = sound;
+                }
+                const status = await silentSoundRef.current.getStatusAsync();
+                if (status.isLoaded && !status.isPlaying) {
+                    await silentSoundRef.current.playAsync();
+                }
             }
         } catch { }
     };
@@ -407,8 +417,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         }
 
         try {
-            if (!isPlaying) {
-                await TrackPlayer.stop();
+            if (silentSoundRef.current) {
+                await silentSoundRef.current.stopAsync();
             }
         } catch { }
     };
