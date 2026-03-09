@@ -20,7 +20,7 @@ export default function SleepScreen() {
                     <Text style={[s.serverStatus,
                     isMindMonitorActive ? { color: '#4CAF50' } : { color: '#E57373' }
                     ]}>
-                        {isMindMonitorActive ? '📡 OSC 服务正在监听 (Port: 5000)' : 'OSC 服务初始化中...'}
+                        {isMindMonitorActive ? '📡 OSC 服务正在监听 (Port: 5005)' : 'OSC 服务初始化中...'}
                     </Text>
 
                     <Text style={{ color: '#aaa', fontSize: 12, marginTop: 10, marginBottom: 5 }}>近期 OSC 消息(最新的在前):</Text>

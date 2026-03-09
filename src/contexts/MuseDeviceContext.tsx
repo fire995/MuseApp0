@@ -278,9 +278,9 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     }, []);
 
     const setupMindMonitorListener = () => {
-        const PORT = 5000;
+        const PORT = 5005; // 改用 5005 端口，为了防止由于同手机下 Mind Monitor 自身占用 5000 端口导致冲突
         try {
-            const socket = dgram.createSocket({ type: 'udp4', reusePort: true });
+            const socket = dgram.createSocket({ type: 'udp4' });
             mmSocketRef.current = socket;
 
             socket.on('message', (msg, rinfo) => {

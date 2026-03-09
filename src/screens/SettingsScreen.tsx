@@ -55,7 +55,7 @@ export default function SettingsScreen() {
                         <Text style={[s.infoVal, { color: isMindMonitorActive ? '#4CAF50' : '#888' }]}>
                             {isMindMonitorActive ? '📡 监听中' : '未连接'}
                         </Text>
-                        <Text style={{ fontSize: 9, color: '#333', marginTop: 4 }}>Port: 5000</Text>
+                        <Text style={{ fontSize: 9, color: '#333', marginTop: 4 }}>Port: 5005</Text>
                     </View>
                 </View>
 
