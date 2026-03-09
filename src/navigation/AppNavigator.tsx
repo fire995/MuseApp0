@@ -37,7 +37,7 @@ export default function AppNavigator() {
             <Tab.Screen
                 name="Sleep"
                 component={SleepScreen}
-                options={{ tabBarLabel: '睡眠', tabBarIcon: () => <Text style={{ fontSize: 20 }}>🌙</Text> }}
+                options={{ tabBarLabel: '分析', tabBarIcon: () => <Text style={{ fontSize: 20 }}>📊</Text> }}
             />
             <Tab.Screen
                 name="Settings"

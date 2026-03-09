@@ -5,7 +5,7 @@ import FFT from 'fft.js';
 // ── 常量 ─────────────────────────────────────────────────────────
 const EEG_SCALE = 0.48828125;      // 12-bit → μV  (= 1000/2048)
 const PPG_SAMPLE_RATE = 64;        // Muse S PPG 采样率 64Hz
-const EEG_SAMPLE_RATE = 256;       // EEG 采样率 256Hz
+export const EEG_SAMPLE_RATE = 256;       // EEG 采样率 256Hz
 
 // Muse S EEG 通道名称，按 0xDF 包内顺序排列
 export const EEG_CHANNEL_NAMES = ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L'] as const;

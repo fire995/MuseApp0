@@ -17,6 +17,7 @@ import {
     HeartRateCalculator, EEG_CHANNEL_NAMES,
 } from '../../utils/MuseDecoder';
 import dgram from 'react-native-udp';
+import { SessionAnalyzer, AnalysisResults } from '../utils/SessionAnalyzer';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
 ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => { } } });
@@ -80,6 +81,9 @@ interface MuseDeviceContextType {
     addMeditationTrack: (name: string, uri: string) => Promise<void>;
     removeMeditationTrack: (id: string) => Promise<void>;
     playMeditationTrack: (id: string) => Promise<void>;
+
+    // 分析结果
+    latestAnalysis: AnalysisResults | null;
 
     // Mind-Monitor OSC
     mindMonitorData: Record<string, any>;
@@ -195,6 +199,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const [isSleepRecording, setIsSleepRecording] = useState(false);
     const [sleepRecordDuration, setSleepRecordDuration] = useState(0);
     const [sleepMusicSegments, setSleepMusicSegments] = useState<Array<{ startSec: number; endSec?: number }>>([]);
+
+    const [latestAnalysis, setLatestAnalysis] = useState<AnalysisResults | null>(null);
 
     // ---- 会话 Refs（供异步回调使用） ----
     const isSleepRecordModeRef = useRef(false);
@@ -780,6 +786,11 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         const content = header + '\n' + (meditationDataBuffer.current || '(本次冥想无 Mind-Monitor 数据)\n');
         try {
             await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+
+            // 执行分析
+            const results = await SessionAnalyzer.analyze(meditationDataBuffer.current, 'meditation');
+            setLatestAnalysis(results);
+
             await Sharing.shareAsync(uri, { dialogTitle: '保存冥想记录' });
         } catch { Alert.alert('保存失败', '无法保存冥想记录文件'); }
         meditationDataBuffer.current = '';
@@ -853,6 +864,12 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         const uri = `${FileSystem.documentDirectory}sleep_record_${timeStr}.txt`;
         try {
             await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+
+            // 执行分析
+            const analysisType = totalSec < 3600 ? 'nap' : 'sleep';
+            const results = await SessionAnalyzer.analyze(sleepDataBuffer.current, analysisType);
+            setLatestAnalysis(results);
+
             await Sharing.shareAsync(uri, { dialogTitle: '保存睡眠记录' });
         } catch { Alert.alert('保存失败', '无法保存睡眠记录文件'); }
         sleepDataBuffer.current = '';
@@ -1232,6 +1249,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             startMeditationSession, endMeditationSession,
             isSleepRecording, sleepRecordDuration, sleepMusicSegments,
             startSleepRecord, endSleepRecord,
+            latestAnalysis,
         }}>
             {children}
         </MuseDeviceContext.Provider>
