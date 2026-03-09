@@ -312,11 +312,12 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             });
 
             socket.on('listening', () => {
-                console.log(`Mind-Monitor OSC Listener active on port ${PORT}`);
+                const addy = socket.address();
+                console.log(`Mind-Monitor OSC Listener active on ${addy.address}:${addy.port}`);
                 setIsMindMonitorActive(true);
             });
 
-            socket.bind(PORT);
+            socket.bind(PORT, '0.0.0.0');
         } catch (e) {
             console.error('Failed to bind Mind-Monitor UDP socket:', e);
         }

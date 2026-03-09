@@ -1,7 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { useMuseDevice } from '../contexts/MuseDeviceContext';
-import DeviceConnection from '../components/DeviceConnection';
 
 export default function HomeScreen() {
     const { battery } = useMuseDevice();
@@ -18,8 +17,6 @@ export default function HomeScreen() {
                     )}
                 </View>
             </View>
-
-            <DeviceConnection />
         </ScrollView>
     );
 }
