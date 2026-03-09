@@ -1,16 +1,43 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { useMuseDevice } from '../contexts/MuseDeviceContext';
 
 export default function SleepScreen() {
+    const { mindMonitorLog, isMindMonitorActive } = useMuseDevice();
+
     return (
         <ScrollView style={s.root} contentContainerStyle={{ paddingBottom: 48 }}>
             <View style={s.header}>
                 <Text style={s.title}>睡眠分析</Text>
             </View>
 
+            {/* 午休 - Data source: mind-monitor */}
+            <View style={[s.placeholder, { marginBottom: 10 }]}>
+                <Text style={s.placeholderTitle}>☀️ 午休分析 (Mind-Monitor OSC)</Text>
+                <Text style={s.placeholderText}>连接 Mind-Monitor 获取午休脑波数据</Text>
+
+                <View style={s.monitorArea}>
+                    <Text style={[s.serverStatus,
+                    isMindMonitorActive ? { color: '#4CAF50' } : { color: '#E57373' }
+                    ]}>
+                        {isMindMonitorActive ? '📡 OSC 服务正在监听 (Port: 5000)' : 'OSC 服务初始化中...'}
+                    </Text>
+
+                    <Text style={{ color: '#aaa', fontSize: 12, marginTop: 10, marginBottom: 5 }}>近期 OSC 消息(最新的在前):</Text>
+                    {mindMonitorLog.length === 0 ? (
+                        <Text style={{ color: '#555', fontSize: 11 }}>等待接收数据...</Text>
+                    ) : (
+                        mindMonitorLog.map((m, idx) => (
+                            <Text key={idx} style={{ color: '#EAEAEA', fontSize: 10, fontFamily: 'monospace', marginBottom: 2 }}>{m}</Text>
+                        ))
+                    )}
+                </View>
+            </View>
+
+            {/* 晚间 - RingConn */}
             <View style={s.placeholder}>
-                <Text style={s.placeholderTitle}>🌙 睡眠分期分析准备中</Text>
-                <Text style={s.placeholderText}>将基于 Delta、Theta 脑波绘制深睡/浅睡结构图</Text>
+                <Text style={s.placeholderTitle}>🌙 晚间分析</Text>
+                <Text style={s.placeholderText}>暂无 RingConn 设备数据，整晚长段睡眠分析占位</Text>
             </View>
         </ScrollView>
     );
@@ -27,7 +54,7 @@ const s = StyleSheet.create({
         padding: 30,
         backgroundColor: '#1A1D27',
         borderRadius: 16,
-        alignItems: 'center',
+        alignItems: 'flex-start',
     },
     placeholderTitle: {
         color: '#EAEAEA',
@@ -37,7 +64,17 @@ const s = StyleSheet.create({
     },
     placeholderText: {
         color: '#888',
-        textAlign: 'center',
-        fontSize: 13
+        fontSize: 13,
+        marginBottom: 15
+    },
+    monitorArea: {
+        backgroundColor: '#12141D',
+        padding: 12,
+        borderRadius: 8,
+        width: '100%',
+    },
+    serverStatus: {
+        fontSize: 13,
+        fontWeight: 'bold',
     }
 });

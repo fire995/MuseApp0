@@ -34,6 +34,7 @@ export default function SettingsScreen() {
         autoSaveIntervalSec, setAutoSaveIntervalSec,
         autoSaveRetainDays, setAutoSaveRetainDays,
         autoSaveTempSize, clearAutoSaveTempFiles,
+        mindMonitorLog, isMindMonitorActive,
     } = useMuseDevice();
 
     const [clearing, setClearing] = useState(false);
@@ -60,6 +61,41 @@ export default function SettingsScreen() {
         <ScrollView style={s.root} contentContainerStyle={{ paddingBottom: 60 }}>
             <View style={s.header}>
                 <Text style={s.title}>设置与数据</Text>
+            </View>
+
+            <View style={s.card}>
+                <Text style={s.cardTitle}>🔗 设备连接情况</Text>
+
+                {/* Mind-Monitor 连接状态 */}
+                <View style={[s.infoRow, { borderBottomWidth: 1, paddingBottom: 12, marginBottom: 12 }]}>
+                    <View style={{ flex: 1 }}>
+                        <Text style={s.infoKey}>Mind-Monitor (OSC/UDP)</Text>
+                        <View style={{ marginTop: 6 }}>
+                            {mindMonitorLog.length === 0 ? (
+                                <Text style={{ fontSize: 10, color: '#444' }}>等待接收本地网络数据包...</Text>
+                            ) : (
+                                mindMonitorLog.slice(0, 5).map((log, i) => (
+                                    <Text key={i} style={{ fontSize: 9, color: '#555', fontFamily: 'monospace' }}>{log}</Text>
+                                ))
+                            )}
+                        </View>
+                    </View>
+                    <View style={{ alignItems: 'flex-end', marginLeft: 10 }}>
+                        <Text style={[s.infoVal, { color: isMindMonitorActive ? '#4CAF50' : '#888' }]}>
+                            {isMindMonitorActive ? '📡 监听中' : '未连接'}
+                        </Text>
+                        <Text style={{ fontSize: 9, color: '#333', marginTop: 4 }}>Port: 5000</Text>
+                    </View>
+                </View>
+
+                {/* RingConn 状态 */}
+                <View style={[s.infoRow, { borderBottomWidth: 0 }]}>
+                    <View>
+                        <Text style={s.infoKey}>RingConn 智能戒指</Text>
+                        <Text style={{ fontSize: 10, color: '#555', marginTop: 4 }}>暂无相关戒指数据</Text>
+                    </View>
+                    <Text style={[s.infoVal, { color: '#888' }]}>暂不可用</Text>
+                </View>
             </View>
 
             {/* 采集控制 */}

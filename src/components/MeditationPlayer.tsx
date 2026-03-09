@@ -37,11 +37,8 @@ export default function MeditationPlayer() {
             <Text style={s.cardTitle}>🎵 冥想音乐</Text>
             <Text style={s.musicName}>{musicName}</Text>
             <View style={s.btnRow}>
-                <TouchableOpacity style={s.btnPurple} onPress={pickAndPlay}>
-                    <Text style={s.btnText}>选择音频</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.btnBlue, isPlaying && s.btnRed]} onPress={togglePlay}>
-                    <Text style={s.btnText}>{isPlaying ? '⏸ 暂停' : '▶ 播放'}</Text>
+                <TouchableOpacity style={[s.btnBlue, isPlaying && s.btnRed, { flex: 1 }]} onPress={togglePlay}>
+                    <Text style={s.btnText}>{isPlaying ? '⏸ 暂停冥想' : '▶ 开始冥想'}</Text>
                 </TouchableOpacity>
             </View>
             <ProgressBar />

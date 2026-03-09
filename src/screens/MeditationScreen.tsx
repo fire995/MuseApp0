@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import MeditationPlayer from '../components/MeditationPlayer';
+import MeditationDatabase from '../components/MeditationDatabase';
 
 export default function MeditationScreen() {
     return (
@@ -11,9 +12,7 @@ export default function MeditationScreen() {
 
             <MeditationPlayer />
 
-            <View style={s.placeholder}>
-                <Text style={s.placeholderText}>按需求保留页面结构{'\n'}更多冥想引导和放松内容即将上线</Text>
-            </View>
+            <MeditationDatabase />
         </ScrollView>
     );
 }
@@ -34,9 +33,16 @@ const s = StyleSheet.create({
         borderWidth: 1,
         borderColor: '#333'
     },
+    placeholderTitle: {
+        color: '#EAEAEA',
+        fontSize: 16,
+        fontWeight: 'bold',
+        marginBottom: 10
+    },
     placeholderText: {
         color: '#666',
         textAlign: 'center',
-        lineHeight: 24
+        fontSize: 13,
+        lineHeight: 20
     }
 });

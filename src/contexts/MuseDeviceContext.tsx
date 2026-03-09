@@ -16,6 +16,7 @@ import {
     parseMusePacket, analyzeFrequency, calculateSignalQuality,
     HeartRateCalculator, EEG_CHANNEL_NAMES,
 } from '../../utils/MuseDecoder';
+import dgram from 'react-native-udp';
 
 if (!global.Buffer) { global.Buffer = Buffer; }
 ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => { } } });
@@ -38,6 +39,14 @@ const CMD_STATUS = 'AnMK';
 
 type SignalLevel = 'good' | 'ok' | 'poor' | 'none';
 type SamplingMode = 'dense' | 'sparse';
+
+export interface MeditationTrack {
+    id: string;
+    name: string;
+    uri: string;
+    duration?: number;
+    addedAt: number;
+}
 
 interface MuseDeviceContextType {
     battery: number | string;
@@ -63,6 +72,17 @@ interface MuseDeviceContextType {
     setAutoSaveRetainDays: (v: number) => void;
     autoSaveTempSize: number; // bytes, 当前临时文件夹总大小
     clearAutoSaveTempFiles: () => Promise<void>;
+
+    // 冥想音乐数据库
+    meditationTracks: MeditationTrack[];
+    addMeditationTrack: (name: string, uri: string) => Promise<void>;
+    removeMeditationTrack: (id: string) => Promise<void>;
+    playMeditationTrack: (id: string) => Promise<void>;
+
+    // Mind-Monitor OSC
+    mindMonitorData: Record<string, any>;
+    mindMonitorLog: string[];
+    isMindMonitorActive: boolean;
 
     scanAndConnect: () => Promise<void>;
     clearPairedDevice: () => Promise<void>;
@@ -135,6 +155,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const hrCalcRef = useRef(new HeartRateCalculator());
     const lastHRTime = useRef<number>(0);
     const silentSoundRef = useRef<Audio.Sound | null>(null);
+
+    // Mind-Monitor OSC State
+    const [mindMonitorData, setMindMonitorData] = useState<Record<string, any>>({});
+    const [mindMonitorLog, setMindMonitorLog] = useState<string[]>([]);
+    const [isMindMonitorActive, setIsMindMonitorActive] = useState(false);
+    const mmSocketRef = useRef<any>(null);
+
+    // 冥想音乐数据库状态
+    const [meditationTracks, setMeditationTracks] = useState<MeditationTrack[]>([]);
 
     // 日志方法简化为只输出到控制台
     const addLog = useCallback((msg: string) => {
@@ -233,14 +262,65 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             recalcTotalSignal();
         }, 1000);
 
+        // 启动 Mind-Monitor OSC 监听
+        setupMindMonitorListener();
+
         return () => {
             if (heartbeat.current) clearInterval(heartbeat.current);
             if (samplingTimer.current) clearTimeout(samplingTimer.current);
             if (diagnosticTimer.current) clearInterval(diagnosticTimer.current);
             if (dataQualityTimer.current) clearInterval(dataQualityTimer.current);
+            if (mmSocketRef.current) {
+                try { mmSocketRef.current.close(); } catch (e) { }
+            }
             appStateSub.remove();
         };
     }, []);
+
+    const setupMindMonitorListener = () => {
+        const PORT = 5000;
+        try {
+            const socket = dgram.createSocket({ type: 'udp4' });
+            mmSocketRef.current = socket;
+
+            socket.on('message', (msg, rinfo) => {
+                const now = new Date().toLocaleTimeString();
+                // 暂时简单的解析逻辑，后续可以引入完善的 OSC Parser
+                const content = msg.toString('binary');
+
+                // 仅提取地址段作为示例演示接收
+                let address = '';
+                if (content.startsWith('/')) {
+                    const nullIdx = content.indexOf('\0');
+                    if (nullIdx !== -1) address = content.substring(0, nullIdx);
+                }
+
+                if (address) {
+                    setMindMonitorData(prev => ({ ...prev, [address]: { time: now, from: rinfo.address } }));
+                    setMindMonitorLog(prev => {
+                        const newLog = [`[${now}] Recv ${address} from ${rinfo.address}`, ...prev];
+                        return newLog.slice(0, 15);
+                    });
+                }
+
+                if (!isMindMonitorActive) setIsMindMonitorActive(true);
+            });
+
+            socket.on('error', (err) => {
+                console.error('MindMonitor Socket Error:', err);
+                setIsMindMonitorActive(false);
+            });
+
+            socket.on('listening', () => {
+                console.log(`Mind-Monitor OSC Listener active on port ${PORT}`);
+                setIsMindMonitorActive(true);
+            });
+
+            socket.bind(PORT);
+        } catch (e) {
+            console.error('Failed to bind Mind-Monitor UDP socket:', e);
+        }
+    };
 
     const MAX_PART_SIZE = 5 * 1024 * 1024;
     const BUFFER_FLUSH_THRESHOLD = 64 * 1024; // 64KB，更激进的防闪退策略
@@ -363,6 +443,45 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             if (isPlaying) { await TrackPlayer.pause(); setIsPlaying(false); }
             else { await TrackPlayer.play(); setIsPlaying(true); }
         } catch { }
+    };
+
+    const addMeditationTrack = async (name: string, uri: string) => {
+        const newTrack: MeditationTrack = {
+            id: `track_${Date.now()}`,
+            name,
+            uri,
+            addedAt: Date.now()
+        };
+        const updated = [newTrack, ...meditationTracks];
+        setMeditationTracks(updated);
+        await AsyncStorage.setItem('MEDITATION_TRACKS', JSON.stringify(updated));
+    };
+
+    const removeMeditationTrack = async (id: string) => {
+        const updated = meditationTracks.filter(t => t.id !== id);
+        setMeditationTracks(updated);
+        await AsyncStorage.setItem('MEDITATION_TRACKS', JSON.stringify(updated));
+    };
+
+    const playMeditationTrack = async (id: string) => {
+        const track = meditationTracks.find(t => t.id === id);
+        if (track) {
+            try {
+                await TrackPlayer.reset();
+                await TrackPlayer.add({
+                    id: track.id,
+                    url: track.uri,
+                    title: track.name,
+                    artist: 'MuseApp Library'
+                });
+                await TrackPlayer.setRepeatMode(RepeatMode.Off);
+                setMusicName(track.name);
+                await TrackPlayer.play();
+                setIsPlaying(true);
+            } catch (e) {
+                console.error('Play track failed:', e);
+            }
+        }
     };
 
     const startForegroundCapture = async () => {
@@ -698,9 +817,11 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const en = await AsyncStorage.getItem('AUTO_SAVE_ENABLED');
                 const interval = await AsyncStorage.getItem('AUTO_SAVE_INTERVAL');
                 const retain = await AsyncStorage.getItem('AUTO_SAVE_RETAIN_DAYS');
+                const tracks = await AsyncStorage.getItem('MEDITATION_TRACKS');
                 if (en !== null) { const v = JSON.parse(en); autoSaveEnabledRef.current = v; setAutoSaveEnabledState(v); }
                 if (interval !== null) { const v = JSON.parse(interval); autoSaveIntervalSecRef.current = v; setAutoSaveIntervalSecState(v); }
                 if (retain !== null) { const v = JSON.parse(retain); autoSaveRetainDaysRef.current = v; setAutoSaveRetainDaysState(v); }
+                if (tracks !== null) { setMeditationTracks(JSON.parse(tracks)); }
             } catch { }
             await refreshTempSize();
         })();
@@ -714,6 +835,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             autoSaveIntervalSec, setAutoSaveIntervalSec,
             autoSaveRetainDays, setAutoSaveRetainDays,
             autoSaveTempSize, clearAutoSaveTempFiles,
+            mindMonitorData, mindMonitorLog, isMindMonitorActive,
+            meditationTracks, addMeditationTrack, removeMeditationTrack, playMeditationTrack,
             scanAndConnect, clearPairedDevice, toggleSave, exportSavedFile, pickAndPlay, togglePlay
         }}>
             {children}
