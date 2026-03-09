@@ -94,6 +94,24 @@ interface MuseDeviceContextType {
     exportSavedFile: () => Promise<void>;
     pickAndPlay: () => Promise<void>;
     togglePlay: () => Promise<void>;
+
+    // 会话模式切换 (false=冥想模式, true=睡眠记录模式)
+    isSleepRecordMode: boolean;
+    setIsSleepRecordMode: (v: boolean) => void;
+
+    // 冥想记录会话
+    meditationSessionActive: boolean;
+    isMeditationCapturing: boolean;
+    meditationRecordDuration: number;
+    startMeditationSession: () => Promise<void>;
+    endMeditationSession: () => Promise<void>;
+
+    // 睡眠记录会话
+    isSleepRecording: boolean;
+    sleepRecordDuration: number;
+    sleepMusicSegments: Array<{ startSec: number; endSec?: number }>;
+    startSleepRecord: () => Promise<void>;
+    endSleepRecord: () => Promise<void>;
 }
 
 const MuseDeviceContext = createContext<MuseDeviceContextType | null>(null);
@@ -168,6 +186,29 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const [isMindMonitorActive, setIsMindMonitorActive] = useState(false);
     const [mindMonitorEnabled, setMindMonitorEnabledState] = useState(false);
     const mmSocketRef = useRef<any>(null);
+
+    // ---- 会话模式状态 ----
+    const [isSleepRecordMode, setIsSleepRecordModeState] = useState(false);
+    const [meditationSessionActive, setMeditationSessionActive] = useState(false);
+    const [isMeditationCapturing, setIsMeditationCapturing] = useState(false);
+    const [meditationRecordDuration, setMeditationRecordDuration] = useState(0);
+    const [isSleepRecording, setIsSleepRecording] = useState(false);
+    const [sleepRecordDuration, setSleepRecordDuration] = useState(0);
+    const [sleepMusicSegments, setSleepMusicSegments] = useState<Array<{ startSec: number; endSec?: number }>>([]);
+
+    // ---- 会话 Refs（供异步回调使用） ----
+    const isSleepRecordModeRef = useRef(false);
+    const meditationSessionActiveRef = useRef(false);
+    const isMeditationCapturingRef = useRef(false);
+    const meditationDataBuffer = useRef<string>('');
+    const meditationAccumulatedSecRef = useRef<number>(0);
+    const meditationAccTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const isSleepRecordingRef = useRef(false);
+    const sleepDataBuffer = useRef<string>('');
+    const sleepRecordStartRef = useRef<number>(0);
+    const sleepDurationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const sleepCurrentMusicStartRef = useRef<number | null>(null);
+    const sleepMusicSegmentsRef = useRef<Array<{ startSec: number; endSec?: number }>>([]);
 
     const setMindMonitorEnabled = async (v: boolean) => {
         setMindMonitorEnabledState(v);
@@ -289,6 +330,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             if (samplingTimer.current) clearTimeout(samplingTimer.current);
             if (diagnosticTimer.current) clearInterval(diagnosticTimer.current);
             if (dataQualityTimer.current) clearInterval(dataQualityTimer.current);
+            if (meditationAccTimerRef.current) clearInterval(meditationAccTimerRef.current);
+            if (sleepDurationTimerRef.current) clearInterval(sleepDurationTimerRef.current);
             if (mmSocketRef.current) {
                 try { mmSocketRef.current.close(); } catch (e) { }
             }
@@ -397,6 +440,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                             const newLog = [`[${now}] Recv ${address} args: ${JSON.stringify(args).substring(0, 30)}`, ...prev];
                             return newLog.slice(0, 15);
                         });
+
+                        // 将原始数据缓冲到会话 buffer
+                        const rawLine = `${new Date().toISOString()},${address},${JSON.stringify(args)}\n`;
+                        if (isMeditationCapturingRef.current) {
+                            meditationDataBuffer.current += rawLine;
+                        }
+                        if (isSleepRecordingRef.current) {
+                            sleepDataBuffer.current += rawLine;
+                        }
 
                         const findNum = (arr: any[]) => arr.find(x => typeof x === 'number');
 
@@ -574,11 +626,47 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         } catch (err) { }
     };
 
+    // 音乐播放状态变化时同步会话状态
+    const _onMusicStarted = useCallback(() => {
+        if (meditationSessionActiveRef.current && !isSleepRecordModeRef.current) {
+            isMeditationCapturingRef.current = true;
+            setIsMeditationCapturing(true);
+            if (!meditationAccTimerRef.current) {
+                meditationAccTimerRef.current = setInterval(() => {
+                    meditationAccumulatedSecRef.current += 1;
+                    setMeditationRecordDuration(meditationAccumulatedSecRef.current);
+                }, 1000);
+            }
+        }
+        if (isSleepRecordingRef.current && sleepCurrentMusicStartRef.current === null) {
+            sleepCurrentMusicStartRef.current = Math.floor((Date.now() - sleepRecordStartRef.current) / 1000);
+        }
+    }, []);
+
+    const _onMusicPaused = useCallback(() => {
+        if (meditationSessionActiveRef.current && !isSleepRecordModeRef.current) {
+            isMeditationCapturingRef.current = false;
+            setIsMeditationCapturing(false);
+            if (meditationAccTimerRef.current) {
+                clearInterval(meditationAccTimerRef.current);
+                meditationAccTimerRef.current = null;
+            }
+        }
+        if (isSleepRecordingRef.current && sleepCurrentMusicStartRef.current !== null) {
+            const endSec = Math.floor((Date.now() - sleepRecordStartRef.current) / 1000);
+            const seg = { startSec: sleepCurrentMusicStartRef.current, endSec };
+            sleepMusicSegmentsRef.current = [...sleepMusicSegmentsRef.current, seg];
+            setSleepMusicSegments([...sleepMusicSegmentsRef.current]);
+            sleepCurrentMusicStartRef.current = null;
+        }
+    }, []);
+
     const togglePlay = async () => {
         try {
             if (isPlaying) {
                 await TrackPlayer.pause();
                 setIsPlaying(false);
+                _onMusicPaused();
             } else {
                 // 如果当前没有轨道，不要尝试 play
                 const currentTrack = await TrackPlayer.getActiveTrack();
@@ -594,6 +682,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
                 await TrackPlayer.play();
                 setIsPlaying(true);
+                _onMusicStarted();
             }
         } catch (e) {
             console.error('Toggle play failed:', e);
@@ -633,11 +722,146 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 setMusicName(track.name);
                 await TrackPlayer.play();
                 setIsPlaying(true);
+                _onMusicStarted();
             } catch (e) {
                 console.error('Play track failed:', e);
             }
         }
     };
+
+    // -------- setIsSleepRecordMode --------
+    const setIsSleepRecordMode = (v: boolean) => {
+        isSleepRecordModeRef.current = v;
+        setIsSleepRecordModeState(v);
+    };
+
+    // -------- 冥想模式会话管理 --------
+    const startMeditationSession = useCallback(async () => {
+        // 硝认 Mind-Monitor 已开启
+        if (!mindMonitorEnabled) {
+            setMindMonitorEnabledState(true);
+            await AsyncStorage.setItem('MIND_MONITOR_ENABLED', JSON.stringify(true));
+        }
+        meditationDataBuffer.current = '';
+        meditationAccumulatedSecRef.current = 0;
+        setMeditationRecordDuration(0);
+        meditationSessionActiveRef.current = true;
+        setMeditationSessionActive(true);
+        // 如果音乐已在播放，立即开始捕捉
+        if (isPlaying) { _onMusicStarted(); }
+    }, [mindMonitorEnabled, isPlaying]);
+
+    const endMeditationSession = useCallback(async () => {
+        // 停止捕捉
+        isMeditationCapturingRef.current = false;
+        setIsMeditationCapturing(false);
+        meditationSessionActiveRef.current = false;
+        setMeditationSessionActive(false);
+        if (meditationAccTimerRef.current) {
+            clearInterval(meditationAccTimerRef.current);
+            meditationAccTimerRef.current = null;
+        }
+        // 暂停音乐
+        try { await TrackPlayer.pause(); setIsPlaying(false); } catch { }
+        // 保存文件
+        const totalSec = meditationAccumulatedSecRef.current;
+        const mm = Math.floor(totalSec / 60).toString().padStart(2, '0');
+        const ss = (totalSec % 60).toString().padStart(2, '0');
+        const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+        const fileName = `meditation_${timeStr}.csv`;
+        const uri = `${FileSystem.documentDirectory}${fileName}`;
+        const header = [
+            '=== 冥想记录 ===',
+            `展开时间: ${new Date().toLocaleString()}`,
+            `纯冥想时长: ${mm}分${ss}秒 (排除暂停)`,
+            '格式: 时间戳,OSC地址,参数',
+            '='.repeat(50),
+        ].join('\n');
+        const content = header + '\n' + (meditationDataBuffer.current || '(本次冥想无 Mind-Monitor 数据)\n');
+        try {
+            await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+            await Sharing.shareAsync(uri, { dialogTitle: '保存冥想记录' });
+        } catch { Alert.alert('保存失败', '无法保存冥想记录文件'); }
+        meditationDataBuffer.current = '';
+        meditationAccumulatedSecRef.current = 0;
+        setMeditationRecordDuration(0);
+    }, []);
+
+    // -------- 睡眠记录会话管理 --------
+    const startSleepRecord = useCallback(async () => {
+        // 开启 Mind-Monitor
+        if (!mindMonitorEnabled) {
+            setMindMonitorEnabledState(true);
+            await AsyncStorage.setItem('MIND_MONITOR_ENABLED', JSON.stringify(true));
+        }
+        sleepDataBuffer.current = '';
+        sleepMusicSegmentsRef.current = [];
+        setSleepMusicSegments([]);
+        sleepCurrentMusicStartRef.current = null;
+        sleepRecordStartRef.current = Date.now();
+        isSleepRecordingRef.current = true;
+        setIsSleepRecording(true);
+        setSleepRecordDuration(0);
+        // 如果音乐已在播放，标记音乐片段开始
+        if (isPlaying) { sleepCurrentMusicStartRef.current = 0; }
+        if (sleepDurationTimerRef.current) clearInterval(sleepDurationTimerRef.current);
+        sleepDurationTimerRef.current = setInterval(() => {
+            setSleepRecordDuration(Math.floor((Date.now() - sleepRecordStartRef.current) / 1000));
+        }, 1000);
+    }, [mindMonitorEnabled, isPlaying]);
+
+    const endSleepRecord = useCallback(async () => {
+        isSleepRecordingRef.current = false;
+        setIsSleepRecording(false);
+        if (sleepDurationTimerRef.current) {
+            clearInterval(sleepDurationTimerRef.current);
+            sleepDurationTimerRef.current = null;
+        }
+        // 封闭正在播放的音乐片段
+        const finalSegments = [...sleepMusicSegmentsRef.current];
+        if (sleepCurrentMusicStartRef.current !== null) {
+            const endSec = Math.floor((Date.now() - sleepRecordStartRef.current) / 1000);
+            finalSegments.push({ startSec: sleepCurrentMusicStartRef.current, endSec });
+            sleepCurrentMusicStartRef.current = null;
+        }
+        setSleepMusicSegments(finalSegments);
+        const totalSec = Math.floor((Date.now() - sleepRecordStartRef.current) / 1000);
+        // 构建音乐时段标注
+        const fmtSec = (s: number) =>
+            `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '00')}`;
+        const segLines = finalSegments.length > 0
+            ? finalSegments.map((seg, i) =>
+                `  [片段${i + 1}] ${fmtSec(seg.startSec)} ~ ${seg.endSec != null ? fmtSec(seg.endSec) : '进行中'} (冥想音乐播放中)`
+            ).join('\n')
+            : '  (本次无冥想音乐播放记录)';
+        const startTime = new Date(sleepRecordStartRef.current);
+        const header = [
+            '=== 睡眠/休息记录 ===',
+            `开始时间: ${startTime.toLocaleString()}`,
+            `结束时间: ${new Date().toLocaleString()}`,
+            `总时长: ${Math.floor(totalSec / 60)}分${totalSec % 60}秒`,
+            '',
+            '冥想音乐播放时间段:',
+            segLines,
+            '',
+            '='.repeat(50),
+            '原始 Mind-Monitor 数据 (ISO时间戳,OSC地址,参数):',
+            '='.repeat(50),
+        ].join('\n');
+        const content = header + '\n' + (sleepDataBuffer.current || '(本次无 Mind-Monitor 数据)\n');
+        const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
+        const uri = `${FileSystem.documentDirectory}sleep_record_${timeStr}.txt`;
+        try {
+            await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+            await Sharing.shareAsync(uri, { dialogTitle: '保存睡眠记录' });
+        } catch { Alert.alert('保存失败', '无法保存睡眠记录文件'); }
+        sleepDataBuffer.current = '';
+        sleepMusicSegmentsRef.current = [];
+        setSleepMusicSegments([]);
+        setSleepRecordDuration(0);
+        setIsSleepRecordModeState(false);
+        isSleepRecordModeRef.current = false;
+    }, []);
 
     const startForegroundCapture = async () => {
         if (Platform.OS === 'android') {
@@ -1001,7 +1225,13 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             autoSaveTempSize, clearAutoSaveTempFiles,
             mindMonitorData, mindMonitorLog, isMindMonitorActive, mindMonitorEnabled, setMindMonitorEnabled,
             meditationTracks, addMeditationTrack, removeMeditationTrack, playMeditationTrack,
-            scanAndConnect, clearPairedDevice, toggleSave, exportSavedFile, pickAndPlay, togglePlay
+            scanAndConnect, clearPairedDevice, toggleSave, exportSavedFile, pickAndPlay, togglePlay,
+            // 会话模式
+            isSleepRecordMode, setIsSleepRecordMode,
+            meditationSessionActive, isMeditationCapturing, meditationRecordDuration,
+            startMeditationSession, endMeditationSession,
+            isSleepRecording, sleepRecordDuration, sleepMusicSegments,
+            startSleepRecord, endSleepRecord,
         }}>
             {children}
         </MuseDeviceContext.Provider>
