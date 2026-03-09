@@ -280,11 +280,13 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const setupMindMonitorListener = () => {
         const PORT = 5000;
         try {
-            const socket = dgram.createSocket({ type: 'udp4' });
+            const socket = dgram.createSocket({ type: 'udp4', reusePort: true });
             mmSocketRef.current = socket;
 
             socket.on('message', (msg, rinfo) => {
                 const now = new Date().toLocaleTimeString();
+                console.log(`[UDP IN] ${msg.length} bytes from ${rinfo.address}:${rinfo.port}`);
+
                 // 暂时简单的解析逻辑，后续可以引入完善的 OSC Parser
                 const content = msg.toString('binary');
 
@@ -293,12 +295,16 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 if (content.startsWith('/')) {
                     const nullIdx = content.indexOf('\0');
                     if (nullIdx !== -1) address = content.substring(0, nullIdx);
+                    else address = content.substring(0, Math.min(content.length, 20)); // fall back
+                } else {
+                    // 若不支持 binary 转换，直接打个原始标志
+                    address = 'RAW_DATA';
                 }
 
                 if (address) {
-                    setMindMonitorData(prev => ({ ...prev, [address]: { time: now, from: rinfo.address } }));
+                    setMindMonitorData(prev => ({ ...prev, [address]: { time: now, from: rinfo.address, len: msg.length } }));
                     setMindMonitorLog(prev => {
-                        const newLog = [`[${now}] Recv ${address} from ${rinfo.address}`, ...prev];
+                        const newLog = [`[${now}] Recv ${address} (${msg.length}B) from ${rinfo.address}`, ...prev];
                         return newLog.slice(0, 15);
                     });
                 }
