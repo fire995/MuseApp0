@@ -3,7 +3,7 @@ import { Platform, AppState, PermissionsAndroid, Linking, Alert } from 'react-na
 import { BleManager, Device } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import TrackPlayer, { Capability, AppKilledPlaybackBehavior, RepeatMode } from 'react-native-track-player';
+import TrackPlayer, { Capability, AppKilledPlaybackBehavior, RepeatMode, Event, State } from 'react-native-track-player';
 import * as DocumentPicker from '@react-native-documents/picker';
 // @ts-ignore
 import * as FileSystem from 'expo-file-system/legacy';
@@ -219,6 +219,13 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                     capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
                 });
                 await TrackPlayer.setRepeatMode(RepeatMode.Track);
+
+                // 监听播放状态同步到 UI
+                TrackPlayer.addEventListener(Event.PlaybackState, (e) => {
+                    const s = e.state;
+                    if (s === State.Playing) setIsPlaying(true);
+                    else if (s === State.Paused || s === State.Stopped) setIsPlaying(false);
+                });
             } catch { }
         };
         setupMusicPlayer();
@@ -552,8 +559,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const res = results[0];
                 await TrackPlayer.reset();
                 await TrackPlayer.add({ id: 'meditation', url: res.uri, title: res.name || '冥想音乐', artist: 'MuseApp' });
-                await TrackPlayer.setRepeatMode(RepeatMode.Off); // 冥想音乐播放完即停，不无限循环
+                await TrackPlayer.setRepeatMode(RepeatMode.Off);
                 setMusicName(res.name || '已加载');
+
+                // 自动加入数据库
+                const exists = meditationTracks.find(t => t.uri === res.uri);
+                if (!exists) {
+                    await addMeditationTrack(res.name || '新音乐', res.uri);
+                }
+
                 await TrackPlayer.play();
                 setIsPlaying(true);
             }
@@ -562,9 +576,28 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
     const togglePlay = async () => {
         try {
-            if (isPlaying) { await TrackPlayer.pause(); setIsPlaying(false); }
-            else { await TrackPlayer.play(); setIsPlaying(true); }
-        } catch { }
+            if (isPlaying) {
+                await TrackPlayer.pause();
+                setIsPlaying(false);
+            } else {
+                // 如果当前没有轨道，不要尝试 play
+                const currentTrack = await TrackPlayer.getActiveTrack();
+                if (!currentTrack) {
+                    Alert.alert('提示', '请先从数据库中选择一首音乐，或点击右上角上传音乐。');
+                    return;
+                }
+
+                // 停止静音占位
+                if (silentSoundRef.current) {
+                    await silentSoundRef.current.stopAsync();
+                }
+
+                await TrackPlayer.play();
+                setIsPlaying(true);
+            }
+        } catch (e) {
+            console.error('Toggle play failed:', e);
+        }
     };
 
     const addMeditationTrack = async (name: string, uri: string) => {
@@ -629,26 +662,33 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         }
 
         try {
-            if (!isPlaying) {
-                if (!silentSoundRef.current) {
-                    const silenceAsset = require('../../assets/silence.wav');
-                    await Audio.setAudioModeAsync({
-                        playsInSilentModeIOS: true,
-                        staysActiveInBackground: true,
-                        shouldDuckAndroid: true,
-                    });
-                    const { sound } = await Audio.Sound.createAsync(
-                        silenceAsset,
-                        { isLooping: true, volume: 0.1 }
-                    );
-                    silentSoundRef.current = sound;
-                }
-                const status = await silentSoundRef.current.getStatusAsync();
-                if (status.isLoaded && !status.isPlaying) {
-                    await silentSoundRef.current.playAsync();
-                }
+            // 如果已经在播放冥想音乐，不需要静音占位，否则会冲突
+            if (isPlaying) {
+                if (silentSoundRef.current) await silentSoundRef.current.stopAsync();
+                return;
             }
-        } catch { }
+
+            if (!silentSoundRef.current) {
+                const silenceAsset = require('../../assets/silence.wav');
+                await Audio.setAudioModeAsync({
+                    playsInSilentModeIOS: true,
+                    staysActiveInBackground: true,
+                    shouldDuckAndroid: false, // 不压低其他音量
+                    playThroughEarpieceAndroid: false
+                });
+                const { sound } = await Audio.Sound.createAsync(
+                    silenceAsset,
+                    { isLooping: true, volume: 0.01 } // 极小音量
+                );
+                silentSoundRef.current = sound;
+            }
+            const status = await silentSoundRef.current.getStatusAsync();
+            if (status.isLoaded && !status.isPlaying) {
+                await silentSoundRef.current.playAsync();
+            }
+        } catch (e) {
+            console.log('Keep-awake audio failed:', e);
+        }
     };
 
     const stopForegroundCapture = async () => {
