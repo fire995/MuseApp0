@@ -26,6 +26,15 @@ export default function HomeScreen() {
             <HeartRateDisplay />
             <BloodOxygenDisplay />
             <HRVDisplay />
+
+            {useMuseDevice().mindMonitorEnabled && (
+                <View style={{ padding: 20 }}>
+                    <Text style={{ color: '#555', fontSize: 12, marginBottom: 8 }}>Mind Monitor 实时日志 (最新 5 条):</Text>
+                    {useMuseDevice().mindMonitorLog.slice(0, 5).map((log, i) => (
+                        <Text key={i} style={{ color: '#444', fontSize: 10 }}>{log}</Text>
+                    ))}
+                </View>
+            )}
         </ScrollView>
     );
 }

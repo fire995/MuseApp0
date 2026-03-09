@@ -85,6 +85,8 @@ interface MuseDeviceContextType {
     mindMonitorData: Record<string, any>;
     mindMonitorLog: string[];
     isMindMonitorActive: boolean;
+    mindMonitorEnabled: boolean;
+    setMindMonitorEnabled: (v: boolean) => void;
 
     scanAndConnect: () => Promise<void>;
     clearPairedDevice: () => Promise<void>;
@@ -164,7 +166,13 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const [mindMonitorData, setMindMonitorData] = useState<Record<string, any>>({});
     const [mindMonitorLog, setMindMonitorLog] = useState<string[]>([]);
     const [isMindMonitorActive, setIsMindMonitorActive] = useState(false);
+    const [mindMonitorEnabled, setMindMonitorEnabledState] = useState(false);
     const mmSocketRef = useRef<any>(null);
+
+    const setMindMonitorEnabled = async (v: boolean) => {
+        setMindMonitorEnabledState(v);
+        await AsyncStorage.setItem('MIND_MONITOR_ENABLED', JSON.stringify(v));
+    };
 
     // 冥想音乐数据库状态
     const [meditationTracks, setMeditationTracks] = useState<MeditationTrack[]>([]);
@@ -281,16 +289,40 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         };
     }, []);
 
+    useEffect(() => {
+        if (mindMonitorEnabled) {
+            setupMindMonitorListener();
+        } else {
+            if (mmSocketRef.current) {
+                try {
+                    mmSocketRef.current.close();
+                    mmSocketRef.current = null;
+                } catch (e) { }
+                setIsMindMonitorActive(false);
+            }
+        }
+        return () => {
+            if (mmSocketRef.current) {
+                try {
+                    mmSocketRef.current.close();
+                    mmSocketRef.current = null;
+                } catch (e) { }
+                setIsMindMonitorActive(false);
+            }
+        };
+    }, [mindMonitorEnabled]);
+
     const parseOscPacket = (buffer: Buffer): { address: string; args: any[] }[] => {
         let offset = 0;
         const readString = () => {
-            let str = '';
+            const start = offset;
             while (offset < buffer.length && buffer[offset] !== 0) {
-                str += String.fromCharCode(buffer[offset]);
                 offset++;
             }
-            offset = (offset + 4) & ~3;
-            return str;
+            const s = buffer.toString('utf8', start, offset);
+            offset++; // skip null
+            offset = (offset + 3) & ~3; // align to 4
+            return s;
         };
 
         const address = readString();
@@ -298,9 +330,10 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         if (address === '#bundle') {
             offset = 16; // Skip #bundle and timetag
             const messages: { address: string; args: any[] }[] = [];
-            while (offset < buffer.length) {
+            while (offset + 4 <= buffer.length) {
                 const size = buffer.readInt32BE(offset);
                 offset += 4;
+                if (offset + size > buffer.length) break;
                 const nextPacket = buffer.slice(offset, offset + size);
                 messages.push(...parseOscPacket(nextPacket));
                 offset += size;
@@ -309,11 +342,9 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         }
 
         let typeTags = '';
-        if (buffer.length > offset && buffer[offset] === 44) {
+        if (offset < buffer.length && buffer[offset] === 44) { // ','
             offset++;
             typeTags = readString();
-        } else {
-            offset = (offset + 4) & ~3;
         }
 
         const args = [];
@@ -323,6 +354,9 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             if (tag === 'f') {
                 args.push(buffer.readFloatBE(offset));
                 offset += 4;
+            } else if (tag === 'd') { // double
+                args.push(buffer.readDoubleBE(offset));
+                offset += 8;
             } else if (tag === 'i') {
                 args.push(buffer.readInt32BE(offset));
                 offset += 4;
@@ -357,7 +391,9 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                             return newLog.slice(0, 15);
                         });
 
-                        if (address === '/muse/eeg') {
+                        const findNum = (arr: any[]) => arr.find(x => typeof x === 'number');
+
+                        if (address === '/muse/eeg' || address.includes('/eeg')) {
                             if (args.length >= 4) {
                                 const waveValue = args[1] as number;
                                 setThetaWave(prev => {
@@ -365,12 +401,23 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                                     return newData.slice(-60);
                                 });
                             }
-                        } else if (address === '/muse/elements/heart_rate' || address === '/heart_rate') {
-                            if (args.length > 0) setHeartRate(Math.round(args[0] as number));
-                        } else if (address === '/muse/elements/spo2' || address === '/blood_oxygen') {
-                            if (args.length > 0) setBloodOxygen(Math.round(args[0] as number));
-                        } else if (address === '/muse/elements/hrv' || address === '/hrv') {
-                            if (args.length > 0) setHrv(Math.round(args[0] as number));
+                        } else if (address.includes('bpm') || address.includes('heart_rate') || address.includes('heartrate') || address === '/heart_rate') {
+                            const val = findNum(args);
+                            if (val !== undefined) {
+                                const rounded = Math.round(val);
+                                if (rounded > 30 && rounded < 220) setHeartRate(rounded);
+                            }
+                        } else if (address.includes('spo2') || address.includes('oxygen') || address === '/blood_oxygen') {
+                            const val = findNum(args);
+                            if (val !== undefined) {
+                                const rounded = Math.round(val);
+                                if (rounded > 0 && rounded <= 100) setBloodOxygen(rounded);
+                            }
+                        } else if (address.includes('hrv') || address === '/hrv') {
+                            const val = findNum(args);
+                            if (val !== undefined) {
+                                setHrv(Math.round(val));
+                            }
                         }
                     });
                 } catch (e) {
@@ -893,10 +940,12 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const interval = await AsyncStorage.getItem('AUTO_SAVE_INTERVAL');
                 const retain = await AsyncStorage.getItem('AUTO_SAVE_RETAIN_DAYS');
                 const tracks = await AsyncStorage.getItem('MEDITATION_TRACKS');
+                const mmEn = await AsyncStorage.getItem('MIND_MONITOR_ENABLED');
                 if (en !== null) { const v = JSON.parse(en); autoSaveEnabledRef.current = v; setAutoSaveEnabledState(v); }
                 if (interval !== null) { const v = JSON.parse(interval); autoSaveIntervalSecRef.current = v; setAutoSaveIntervalSecState(v); }
                 if (retain !== null) { const v = JSON.parse(retain); autoSaveRetainDaysRef.current = v; setAutoSaveRetainDaysState(v); }
                 if (tracks !== null) { setMeditationTracks(JSON.parse(tracks)); }
+                if (mmEn !== null) { setMindMonitorEnabledState(JSON.parse(mmEn)); }
             } catch { }
             await refreshTempSize();
         })();
@@ -910,7 +959,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             autoSaveIntervalSec, setAutoSaveIntervalSec,
             autoSaveRetainDays, setAutoSaveRetainDays,
             autoSaveTempSize, clearAutoSaveTempFiles,
-            mindMonitorData, mindMonitorLog, isMindMonitorActive,
+            mindMonitorData, mindMonitorLog, isMindMonitorActive, mindMonitorEnabled, setMindMonitorEnabled,
             meditationTracks, addMeditationTrack, removeMeditationTrack, playMeditationTrack,
             scanAndConnect, clearPairedDevice, toggleSave, exportSavedFile, pickAndPlay, togglePlay
         }}>
