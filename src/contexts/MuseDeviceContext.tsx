@@ -281,24 +281,40 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         };
     }, []);
 
-    const parseOscPacket = (buffer: Buffer) => {
+    const parseOscPacket = (buffer: Buffer): { address: string; args: any[] }[] => {
         let offset = 0;
-        let address = '';
-        while (offset < buffer.length && buffer[offset] !== 0) {
-            address += String.fromCharCode(buffer[offset]);
-            offset++;
-        }
-        offset = (offset + 4) & ~3;
-
-        let typeTags = '';
-        if (buffer.length > offset && buffer[offset] === 44) { // ','
-            offset++;
+        const readString = () => {
+            let str = '';
             while (offset < buffer.length && buffer[offset] !== 0) {
-                typeTags += String.fromCharCode(buffer[offset]);
+                str += String.fromCharCode(buffer[offset]);
                 offset++;
             }
+            offset = (offset + 4) & ~3;
+            return str;
+        };
+
+        const address = readString();
+
+        if (address === '#bundle') {
+            offset = 16; // Skip #bundle and timetag
+            const messages: { address: string; args: any[] }[] = [];
+            while (offset < buffer.length) {
+                const size = buffer.readInt32BE(offset);
+                offset += 4;
+                const nextPacket = buffer.slice(offset, offset + size);
+                messages.push(...parseOscPacket(nextPacket));
+                offset += size;
+            }
+            return messages;
         }
-        offset = (offset + 4) & ~3;
+
+        let typeTags = '';
+        if (buffer.length > offset && buffer[offset] === 44) {
+            offset++;
+            typeTags = readString();
+        } else {
+            offset = (offset + 4) & ~3;
+        }
 
         const args = [];
         for (let i = 0; i < typeTags.length; i++) {
@@ -311,31 +327,29 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 args.push(buffer.readInt32BE(offset));
                 offset += 4;
             } else if (tag === 's') {
-                let str = '';
-                while (offset < buffer.length && buffer[offset] !== 0) {
-                    str += String.fromCharCode(buffer[offset]);
-                    offset++;
-                }
-                offset = (offset + 4) & ~3;
-                args.push(str);
+                args.push(readString());
+            } else if (tag === 'b') { // blob
+                const size = buffer.readInt32BE(offset);
+                offset += 4;
+                args.push(buffer.slice(offset, offset + size));
+                offset = (offset + size + 3) & ~3;
             }
         }
-        return { address, args };
+        return [{ address, args }];
     };
 
     const setupMindMonitorListener = () => {
-        const PORT = 5005; // 改用 5005 端口，为了防止由于同手机下 Mind Monitor 自身占用 5000 端口导致冲突
+        const PORT = 5005;
         try {
             const socket = dgram.createSocket({ type: 'udp4' });
             mmSocketRef.current = socket;
 
             socket.on('message', (msg, rinfo) => {
                 const now = new Date().toLocaleTimeString();
-
                 try {
-                    const parsed = parseOscPacket(msg);
-                    if (parsed && parsed.address) {
-                        const { address, args } = parsed;
+                    const messages = parseOscPacket(msg);
+                    messages.forEach(packet => {
+                        const { address, args } = packet;
 
                         setMindMonitorData(prev => ({ ...prev, [address]: { time: now, from: rinfo.address, len: msg.length, args } }));
                         setMindMonitorLog(prev => {
@@ -343,11 +357,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                             return newLog.slice(0, 15);
                         });
 
-                        // 脑波、心率、血氧、HRV 特殊处理提取
                         if (address === '/muse/eeg') {
-                            // EEG data: [TP9, AF7, AF8, TP10, AUX]
                             if (args.length >= 4) {
-                                // 提取额头波形（AF7 或 AF8）或者 TP9 用于Live波形展示
                                 const waveValue = args[1] as number;
                                 setThetaWave(prev => {
                                     const newData = [...prev, waveValue];
@@ -361,9 +372,9 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                         } else if (address === '/muse/elements/hrv' || address === '/hrv') {
                             if (args.length > 0) setHrv(Math.round(args[0] as number));
                         }
-                    }
+                    });
                 } catch (e) {
-                    // 解析失败时 fallback
+                    console.warn('OSC Parse Error:', e);
                 }
 
                 if (!isMindMonitorActive) setIsMindMonitorActive(true);
