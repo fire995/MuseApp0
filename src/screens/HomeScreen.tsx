@@ -1,6 +1,10 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { useMuseDevice } from '../contexts/MuseDeviceContext';
+import LiveWaveform from '../components/LiveWaveform';
+import HeartRateDisplay from '../components/HeartRateDisplay';
+import BloodOxygenDisplay from '../components/BloodOxygenDisplay';
+import HRVDisplay from '../components/HRVDisplay';
 
 export default function HomeScreen() {
     const { battery } = useMuseDevice();
@@ -17,6 +21,11 @@ export default function HomeScreen() {
                     )}
                 </View>
             </View>
+
+            <LiveWaveform />
+            <HeartRateDisplay />
+            <BloodOxygenDisplay />
+            <HRVDisplay />
         </ScrollView>
     );
 }

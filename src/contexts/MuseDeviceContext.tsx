@@ -63,6 +63,8 @@ interface MuseDeviceContextType {
     savePath: string;
     saveDuration: number;
     heartRate: number | null;
+    bloodOxygen: number | null;
+    hrv: number | null;
     // 自动保存设置
     autoSaveEnabled: boolean;
     setAutoSaveEnabled: (v: boolean) => void;
@@ -119,6 +121,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const [savePath, setSavePath] = useState('');
     const [saveDuration, setSaveDuration] = useState(0);
     const [heartRate, setHeartRate] = useState<number | null>(null);
+    const [bloodOxygen, setBloodOxygen] = useState<number | null>(null);
+    const [hrv, setHrv] = useState<number | null>(null);
 
     // 自动保存设置（从 AsyncStorage 加载，默认值）
     const [autoSaveEnabled, setAutoSaveEnabledState] = useState(true);
@@ -277,6 +281,48 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         };
     }, []);
 
+    const parseOscPacket = (buffer: Buffer) => {
+        let offset = 0;
+        let address = '';
+        while (offset < buffer.length && buffer[offset] !== 0) {
+            address += String.fromCharCode(buffer[offset]);
+            offset++;
+        }
+        offset = (offset + 4) & ~3;
+
+        let typeTags = '';
+        if (buffer.length > offset && buffer[offset] === 44) { // ','
+            offset++;
+            while (offset < buffer.length && buffer[offset] !== 0) {
+                typeTags += String.fromCharCode(buffer[offset]);
+                offset++;
+            }
+        }
+        offset = (offset + 4) & ~3;
+
+        const args = [];
+        for (let i = 0; i < typeTags.length; i++) {
+            if (offset >= buffer.length) break;
+            const tag = typeTags[i];
+            if (tag === 'f') {
+                args.push(buffer.readFloatBE(offset));
+                offset += 4;
+            } else if (tag === 'i') {
+                args.push(buffer.readInt32BE(offset));
+                offset += 4;
+            } else if (tag === 's') {
+                let str = '';
+                while (offset < buffer.length && buffer[offset] !== 0) {
+                    str += String.fromCharCode(buffer[offset]);
+                    offset++;
+                }
+                offset = (offset + 4) & ~3;
+                args.push(str);
+            }
+        }
+        return { address, args };
+    };
+
     const setupMindMonitorListener = () => {
         const PORT = 5005; // 改用 5005 端口，为了防止由于同手机下 Mind Monitor 自身占用 5000 端口导致冲突
         try {
@@ -285,28 +331,39 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
             socket.on('message', (msg, rinfo) => {
                 const now = new Date().toLocaleTimeString();
-                console.log(`[UDP IN] ${msg.length} bytes from ${rinfo.address}:${rinfo.port}`);
 
-                // 暂时简单的解析逻辑，后续可以引入完善的 OSC Parser
-                const content = msg.toString('binary');
+                try {
+                    const parsed = parseOscPacket(msg);
+                    if (parsed && parsed.address) {
+                        const { address, args } = parsed;
 
-                // 仅提取地址段作为示例演示接收
-                let address = '';
-                if (content.startsWith('/')) {
-                    const nullIdx = content.indexOf('\0');
-                    if (nullIdx !== -1) address = content.substring(0, nullIdx);
-                    else address = content.substring(0, Math.min(content.length, 20)); // fall back
-                } else {
-                    // 若不支持 binary 转换，直接打个原始标志
-                    address = 'RAW_DATA';
-                }
+                        setMindMonitorData(prev => ({ ...prev, [address]: { time: now, from: rinfo.address, len: msg.length, args } }));
+                        setMindMonitorLog(prev => {
+                            const newLog = [`[${now}] Recv ${address} args: ${JSON.stringify(args).substring(0, 30)}`, ...prev];
+                            return newLog.slice(0, 15);
+                        });
 
-                if (address) {
-                    setMindMonitorData(prev => ({ ...prev, [address]: { time: now, from: rinfo.address, len: msg.length } }));
-                    setMindMonitorLog(prev => {
-                        const newLog = [`[${now}] Recv ${address} (${msg.length}B) from ${rinfo.address}`, ...prev];
-                        return newLog.slice(0, 15);
-                    });
+                        // 脑波、心率、血氧、HRV 特殊处理提取
+                        if (address === '/muse/eeg') {
+                            // EEG data: [TP9, AF7, AF8, TP10, AUX]
+                            if (args.length >= 4) {
+                                // 提取额头波形（AF7 或 AF8）或者 TP9 用于Live波形展示
+                                const waveValue = args[1] as number;
+                                setThetaWave(prev => {
+                                    const newData = [...prev, waveValue];
+                                    return newData.slice(-60);
+                                });
+                            }
+                        } else if (address === '/muse/elements/heart_rate' || address === '/heart_rate') {
+                            if (args.length > 0) setHeartRate(Math.round(args[0] as number));
+                        } else if (address === '/muse/elements/spo2' || address === '/blood_oxygen') {
+                            if (args.length > 0) setBloodOxygen(Math.round(args[0] as number));
+                        } else if (address === '/muse/elements/hrv' || address === '/hrv') {
+                            if (args.length > 0) setHrv(Math.round(args[0] as number));
+                        }
+                    }
+                } catch (e) {
+                    // 解析失败时 fallback
                 }
 
                 if (!isMindMonitorActive) setIsMindMonitorActive(true);
@@ -837,7 +894,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     return (
         <MuseDeviceContext.Provider value={{
             battery, signalLevel, signalScore, electrodeQuality, packetsRx, samplingMode, savedDeviceId, thetaWave,
-            isPlaying, musicName, isSaving, savePath, saveDuration, heartRate,
+            isPlaying, musicName, isSaving, savePath, saveDuration, heartRate, bloodOxygen, hrv,
             autoSaveEnabled, setAutoSaveEnabled,
             autoSaveIntervalSec, setAutoSaveIntervalSec,
             autoSaveRetainDays, setAutoSaveRetainDays,
