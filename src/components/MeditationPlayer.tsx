@@ -1,12 +1,11 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Switch, Alert } from 'react-native';
-import TrackPlayer, { useProgress } from 'react-native-track-player';
 import Slider from '@react-native-community/slider';
 import { useMuseDevice } from '../contexts/MuseDeviceContext';
 
-// ── 进度条子组件 ──────────────────────────────────────
-const ProgressBar = () => {
-    const { position, duration } = useProgress();
+// ── 进度条子组件 ─────────────────────────────────
+// receives progress/duration/seekMusic from parent to avoid calling useMuseDevice twice
+const ProgressBar = ({ position, duration, onSeek }: { position: number, duration: number, onSeek: (v: number) => Promise<void> }) => {
     const fmt = (sec: number) =>
         `${Math.floor(sec / 60)}:${Math.floor(sec % 60).toString().padStart(2, '0')}`;
     return (
@@ -20,7 +19,7 @@ const ProgressBar = () => {
                 minimumTrackTintColor="#3498DB"
                 maximumTrackTintColor="#2A2D3A"
                 thumbTintColor="#3498DB"
-                onSlidingComplete={async (val) => { await TrackPlayer.seekTo(val); }}
+                onSlidingComplete={onSeek}
             />
             <Text style={[s.timeText, { textAlign: 'right' }]}>{fmt(duration)}</Text>
         </View>
@@ -39,6 +38,7 @@ const fmtMmSs = (sec: number) =>
 export default function MeditationPlayer() {
     const {
         musicName, togglePlay, isPlaying,
+        musicProgress, musicDuration, seekMusic,
         isSleepRecordMode, setIsSleepRecordMode,
         meditationSessionActive, isMeditationCapturing, meditationRecordDuration,
         isSleepRecording, sleepRecordDuration, sleepMusicSegments,
@@ -201,7 +201,7 @@ export default function MeditationPlayer() {
             </View>
 
             {/* ── 进度条 ── */}
-            <ProgressBar />
+            <ProgressBar position={musicProgress} duration={musicDuration} onSeek={seekMusic} />
 
             {/* ── 模式说明 ── */}
             {!isSessionActive && (

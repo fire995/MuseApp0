@@ -1,0 +1,259 @@
+diff --git a/node_modules/react-native-osc/android/.classpath b/node_modules/react-native-osc/android/.classpath
+index eb19361..bbe97e5 100644
+--- a/node_modules/react-native-osc/android/.classpath
++++ b/node_modules/react-native-osc/android/.classpath
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <classpath>
+-	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-1.8/"/>
++	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-17/"/>
+ 	<classpathentry kind="con" path="org.eclipse.buildship.core.gradleclasspathcontainer"/>
+ 	<classpathentry kind="output" path="bin/default"/>
+ </classpath>
+diff --git a/node_modules/react-native-osc/android/.gradle/5.4.1/fileChanges/last-build.bin b/node_modules/react-native-osc/android/.gradle/5.4.1/fileChanges/last-build.bin
+new file mode 100644
+index 0000000..f76dd23
+Binary files /dev/null and b/node_modules/react-native-osc/android/.gradle/5.4.1/fileChanges/last-build.bin differ
+diff --git a/node_modules/react-native-osc/android/.gradle/5.4.1/fileHashes/fileHashes.lock b/node_modules/react-native-osc/android/.gradle/5.4.1/fileHashes/fileHashes.lock
+new file mode 100644
+index 0000000..e11ae65
+Binary files /dev/null and b/node_modules/react-native-osc/android/.gradle/5.4.1/fileHashes/fileHashes.lock differ
+diff --git a/node_modules/react-native-osc/android/.gradle/5.4.1/gc.properties b/node_modules/react-native-osc/android/.gradle/5.4.1/gc.properties
+new file mode 100644
+index 0000000..e69de29
+diff --git a/node_modules/react-native-osc/android/.project b/node_modules/react-native-osc/android/.project
+index 675ef59..e23080e 100644
+--- a/node_modules/react-native-osc/android/.project
++++ b/node_modules/react-native-osc/android/.project
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <projectDescription>
+-	<name>android</name>
++	<name>react-native-osc</name>
+ 	<comment>Project android_ created by Buildship.</comment>
+ 	<projects>
+ 	</projects>
+@@ -20,4 +20,15 @@
+ 		<nature>org.eclipse.jdt.core.javanature</nature>
+ 		<nature>org.eclipse.buildship.core.gradleprojectnature</nature>
+ 	</natures>
++	<filteredResources>
++		<filter>
++			<id>1773155595124</id>
++			<name></name>
++			<type>30</type>
++			<matcher>
++				<id>org.eclipse.core.resources.regexFilterMatcher</id>
++				<arguments>node_modules|\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__</arguments>
++			</matcher>
++		</filter>
++	</filteredResources>
+ </projectDescription>
+diff --git a/node_modules/react-native-osc/android/.settings/org.eclipse.buildship.core.prefs b/node_modules/react-native-osc/android/.settings/org.eclipse.buildship.core.prefs
+index e889521..e479558 100644
+--- a/node_modules/react-native-osc/android/.settings/org.eclipse.buildship.core.prefs
++++ b/node_modules/react-native-osc/android/.settings/org.eclipse.buildship.core.prefs
+@@ -1,2 +1,13 @@
++arguments=
++auto.sync=false
++build.scans.enabled=false
++connection.gradle.distribution=GRADLE_DISTRIBUTION(WRAPPER)
+ connection.project.dir=
+ eclipse.preferences.version=1
++gradle.user.home=
++java.home=
++jvm.arguments=
++offline.mode=false
++override.workspace.settings=false
++show.console.view=false
++show.executions.view=false
+diff --git a/node_modules/react-native-osc/android/build.gradle b/node_modules/react-native-osc/android/build.gradle
+index 5bbb595..e0b4286 100644
+--- a/node_modules/react-native-osc/android/build.gradle
++++ b/node_modules/react-native-osc/android/build.gradle
+@@ -1,152 +1,70 @@
+-// android/build.gradle
++// D:\React\MuseApp\node_modules\react-native-osc\android\build.gradle
+ 
+-// based on:
+-//
+-// * https://github.com/facebook/react-native/blob/0.60-stable/template/android/build.gradle
+-//   original location:
+-//   - https://github.com/facebook/react-native/blob/0.58-stable/local-cli/templates/HelloWorld/android/build.gradle
+-//
+-// * https://github.com/facebook/react-native/blob/0.60-stable/template/android/app/build.gradle
+-//   original location:
+-//   - https://github.com/facebook/react-native/blob/0.58-stable/local-cli/templates/HelloWorld/android/app/build.gradle
++import groovy.json.JsonSlurper
+ 
+-def DEFAULT_COMPILE_SDK_VERSION = 28
+-def DEFAULT_BUILD_TOOLS_VERSION = '28.0.3'
+-def DEFAULT_MIN_SDK_VERSION = 16
+-def DEFAULT_TARGET_SDK_VERSION = 28
++def DEFAULT_COMPILE_SDK_VERSION = 34
++def DEFAULT_BUILD_TOOLS_VERSION = '34.0.0'
++def DEFAULT_MIN_SDK_VERSION = 21
++def DEFAULT_TARGET_SDK_VERSION = 34
+ 
+ def safeExtGet(prop, fallback) {
+     rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+ }
+ 
+ apply plugin: 'com.android.library'
+-apply plugin: 'maven'
+-
+-buildscript {
+-    // The Android Gradle plugin is only required when opening the android folder stand-alone.
+-    // This avoids unnecessary downloads and potential conflicts when the library is included as a
+-    // module dependency in an application project.
+-    // ref: https://docs.gradle.org/current/userguide/tutorial_using_tasks.html#sec:build_script_external_dependencies
+-    if (project == rootProject) {
+-        repositories {
+-            google()
+-            jcenter()
+-        }
+-        dependencies {
+-            classpath 'com.android.tools.build:gradle:3.4.1'
+-        }
+-    }
+-}
+-
+-apply plugin: 'com.android.library'
+-apply plugin: 'maven'
+ 
+ android {
+-    compileSdkVersion safeExtGet('compileSdkVersion', DEFAULT_COMPILE_SDK_VERSION)
++    // 必须添加命名空间
++    namespace "com.reactlibrary"    
++    compileSdk safeExtGet('compileSdkVersion', DEFAULT_COMPILE_SDK_VERSION)
+     buildToolsVersion safeExtGet('buildToolsVersion', DEFAULT_BUILD_TOOLS_VERSION)
++    
+     defaultConfig {
+-        minSdkVersion safeExtGet('minSdkVersion', DEFAULT_MIN_SDK_VERSION)
+-        targetSdkVersion safeExtGet('targetSdkVersion', DEFAULT_TARGET_SDK_VERSION)
++        minSdk safeExtGet('minSdkVersion', DEFAULT_MIN_SDK_VERSION)
++        targetSdk safeExtGet('targetSdkVersion', DEFAULT_TARGET_SDK_VERSION)
+         versionCode 1
+         versionName "1.0"
+     }
++    
+     lintOptions {
+         abortOnError false
+     }
+ }
+ 
+ repositories {
+-    // ref: https://www.baeldung.com/maven-local-repository
+     mavenLocal()
+-    maven {
+-        // All of React Native (JS, Obj-C sources, Android binaries) is installed from npm
+-        url "$rootDir/../node_modules/react-native/android"
+-    }
+-    maven {
+-        // Android JSC is installed from npm
+-        url "$rootDir/../node_modules/jsc-android/dist"
+-    }
+     google()
+-    jcenter()
++    mavenCentral()
++    maven { url "$rootDir/../node_modules/react-native/android" }
+ }
+ 
+ dependencies {
+-    //noinspection GradleDynamicVersion
+     implementation fileTree(dir: "libs", include: ["*.jar"])
+     implementation 'com.facebook.react:react-native:+'
+     implementation files('libs/slf4j-api-1.7.30.jar')
+-    implementation files('libs/slf4j-android-1.7.30.jar')  // From node_modules
+-}
+-
+-def configureReactNativePom(def pom) {
+-    def packageJson = new groovy.json.JsonSlurper().parseText(file('../package.json').text)
+-
+-    pom.project {
+-        name packageJson.title
+-        artifactId packageJson.name
+-        version = packageJson.version
+-        group = "com.reactlibrary"
+-        description packageJson.description
+-        url packageJson.repository.baseUrl
+-
+-        licenses {
+-            license {
+-                name packageJson.license
+-                url packageJson.repository.baseUrl + '/blob/master/' + packageJson.licenseFilename
+-                distribution 'repo'
+-            }
+-        }
+-
+-        developers {
+-            developer {
+-                id packageJson.author.username
+-                name packageJson.author.name
+-            }
+-        }
+-    }
++    implementation files('libs/slf4j-android-1.7.30.jar')
+ }
+ 
++// 核心修复：移除导致崩溃的旧版 Javadoc 逻辑，改用符合 Gradle 9 规范的写法
+ afterEvaluate { project ->
+-    // some Gradle build hooks ref:
+-    // https://www.oreilly.com/library/view/gradle-beyond-the/9781449373801/ch03.html
+     task androidJavadoc(type: Javadoc) {
+         source = android.sourceSets.main.java.srcDirs
+         classpath += files(android.bootClasspath)
+-        classpath += files(project.getConfigurations().getByName('compile').asList())
++        // 关键点：不再直接解析 implementation，改用 runtimeClasspath
++        if (project.getConfigurations().findByName('runtimeClasspath')) {
++            classpath += project.getConfigurations().getByName('runtimeClasspath')
++        }
+         include '**/*.java'
+     }
+ 
+     task androidJavadocJar(type: Jar, dependsOn: androidJavadoc) {
+-        classifier = 'javadoc'
++        archiveClassifier = 'javadoc'
+         from androidJavadoc.destinationDir
+     }
+ 
+     task androidSourcesJar(type: Jar) {
+-        classifier = 'sources'
++        archiveClassifier = 'sources'
+         from android.sourceSets.main.java.srcDirs
+         include '**/*.java'
+     }
+-
+-    android.libraryVariants.all { variant ->
+-        def name = variant.name.capitalize()
+-        def javaCompileTask = variant.javaCompileProvider.get()
+-
+-        task "jar${name}"(type: Jar, dependsOn: javaCompileTask) {
+-            from javaCompileTask.destinationDir
+-        }
+-    }
+-
+-    artifacts {
+-        archives androidSourcesJar
+-        archives androidJavadocJar
+-    }
+-
+-    task installArchives(type: Upload) {
+-        configuration = configurations.archives
+-        repositories.mavenDeployer {
+-            // Deploy to react-native-event-bridge/maven, ready to publish to npm
+-            repository url: "file://${projectDir}/../android/maven"
+-            configureReactNativePom pom
+-        }
+-    }
+ }
+\ No newline at end of file
+diff --git a/node_modules/react-native-osc/android/src/main/AndroidManifest.xml b/node_modules/react-native-osc/android/src/main/AndroidManifest.xml
+index 20c90c4..33a0bd5 100644
+--- a/node_modules/react-native-osc/android/src/main/AndroidManifest.xml
++++ b/node_modules/react-native-osc/android/src/main/AndroidManifest.xml
+@@ -1,4 +1,3 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+           package="com.reactlibrary">
+-
+ </manifest>

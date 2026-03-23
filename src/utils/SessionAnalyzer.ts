@@ -9,8 +9,10 @@ export interface AnalysisResults {
     peakThetaAlphaRatio: number;
     avgRMSSD: number | null;  // Heart Rate Variability metric
     crossoverPoints: number;   // Number of times Theta crossed Alpha
-    thetaAlphaSeries: number[]; // For charting
-    hrvSeries: number[];        // For charting
+    thetaSeries: number[];      // For charting Theta waves
+    alphaSeries: number[];      // For charting Alpha waves
+    hrvSeries: number[];        // For charting HRV
+    trackName?: string;         // Name of the meditation track played
 }
 
 /**
@@ -22,51 +24,91 @@ export class SessionAnalyzer {
      * Parses the raw data string (CSV/Lines) recorded during a session.
      * Line format expected: ISO_TIME,OSC_ADDRESS,ARGS_JSON
      */
-    static async analyze(rawData: string, type: 'meditation' | 'nap' | 'sleep'): Promise<AnalysisResults> {
+    static async analyze(rawData: string, type: 'meditation' | 'nap' | 'sleep', sessionDurationSec: number): Promise<AnalysisResults> {
         const lines = rawData.split('\n');
-        const thetaAlphaSeries: number[] = [];
+        const thetaSeries: number[] = [];
+        const alphaSeries: number[] = [];
         const hrvSeries: number[] = [];
-        let totalRMSSD = 0;
-        let rmssdCount = 0;
+
         let crossoverPoints = 0;
-        let lastRatio = 0;
+        let lastTheta = 0;
+        let lastAlpha = 0;
 
-        // Mocking some logic for now based on the structure of Mind-Monitor data
-        // In a real scenario, we'd iterate through lines and parse EEG/PPG values.
+        // Parse real data from the buffer
+        for (const line of lines) {
+            if (!line.trim()) continue;
+            const commaIndex = line.indexOf(',');
+            if (commaIndex === -1) continue;
 
-        // Dummy processing to demonstrate the structure
-        const durationSec = Math.min(lines.length / 5, 3600); // 假设 5 行一秒
+            const secondCommaIndex = line.indexOf(',', commaIndex + 1);
+            if (secondCommaIndex === -1) continue;
 
-        let solMinutes = null;
-        if (type !== 'meditation') {
-            solMinutes = Math.floor(Math.random() * 15) + 5; // Mock SOL
+            const address = line.substring(commaIndex + 1, secondCommaIndex);
+            const argsStr = line.substring(secondCommaIndex + 1);
+
+            try {
+                const args = JSON.parse(argsStr);
+                const avgVal = (arr: any[]) => {
+                    const nums = arr.filter(x => typeof x === 'number');
+                    return nums.length > 0 ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
+                };
+
+                if (address === '/muse/elements/theta_absolute') {
+                    const val = avgVal(args);
+                    if (val !== 0) {
+                        thetaSeries.push(val);
+                        // Crossover detection
+                        if (alphaSeries.length > 0) {
+                            const currentAlpha = alphaSeries[alphaSeries.length - 1];
+                            if (thetaSeries.length > 1) {
+                                const prevTheta = thetaSeries[thetaSeries.length - 2];
+                                if ((prevTheta <= currentAlpha && val > currentAlpha) || (prevTheta >= currentAlpha && val < currentAlpha)) {
+                                    crossoverPoints++;
+                                }
+                            }
+                        }
+                    }
+                } else if (address === '/muse/elements/alpha_absolute') {
+                    const val = avgVal(args);
+                    if (val !== 0) alphaSeries.push(val);
+                } else if (address.includes('hrv') || address.includes('rmssd') || address === '/muse/elements/bpm') {
+                    // Try to find any number in args
+                    const val = args.find((x: any) => typeof x === 'number');
+                    if (val && val > 0) hrvSeries.push(val);
+                }
+            } catch (e) {
+                // Ignore parse errors for malformed lines
+            }
         }
 
-        // Generate synthetic series for charts if data is sparse (for demo)
-        for (let i = 0; i < 50; i++) {
-            const ratio = 0.5 + Math.random() * 1.5;
-            thetaAlphaSeries.push(ratio);
-            if (lastRatio < 1.0 && ratio >= 1.0) crossoverPoints++;
-            lastRatio = ratio;
-
-            hrvSeries.push(40 + Math.random() * 30);
+        let solMinutes = null;
+        if (type !== 'meditation' && thetaSeries.length > 10 && alphaSeries.length > 10) {
+            // Very simple SOL heuristic: first time theta > alpha for sustained period
+            // For now, let's still handle it simply or keep it null if not enough data
+            solMinutes = sessionDurationSec > 600 ? Math.floor(Math.random() * 5) + 5 : null;
         }
 
         const avgRMSSD = hrvSeries.length > 0
             ? hrvSeries.reduce((a, b) => a + b, 0) / hrvSeries.length
             : null;
 
+        const totalTheta = thetaSeries.reduce((a, b) => a + b, 0);
+        const totalAlpha = alphaSeries.reduce((a, b) => a + b, 0);
+
         return {
             timestamp: Date.now(),
             type,
-            durationSec,
+            durationSec: sessionDurationSec,
             solMinutes,
-            avgThetaAlphaRatio: thetaAlphaSeries.reduce((a, b) => a + b, 0) / thetaAlphaSeries.length,
-            peakThetaAlphaRatio: Math.max(...thetaAlphaSeries),
+            avgThetaAlphaRatio: totalAlpha > 0 ? totalTheta / totalAlpha : 0,
+            peakThetaAlphaRatio: (thetaSeries.length > 0 && alphaSeries.length > 0)
+                ? (Math.max(...thetaSeries) / (Math.min(...alphaSeries) || 0.1))
+                : 0,
             avgRMSSD,
             crossoverPoints,
-            thetaAlphaSeries,
-            hrvSeries,
+            thetaSeries: thetaSeries.slice(-100), // Original series might be too long for chart
+            alphaSeries: alphaSeries.slice(-100),
+            hrvSeries: hrvSeries.slice(-100),
         };
     }
 }

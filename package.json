@@ -45,6 +45,7 @@
     "react-native-safe-area-context": "^5.7.0",
     "react-native-screens": "^4.24.0",
     "react-native-share": "^12.2.5",
+    "react-native-share-menu": "^6.0.0",
     "react-native-svg": "15.15.3",
     "react-native-track-player": "5.0.0-alpha0",
     "react-native-udp": "^4.1.7",

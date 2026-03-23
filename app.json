@@ -28,7 +28,9 @@
         {
           "android": {
             "kotlinVersion": "2.0.21",
-            "newArchEnabled": false
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 35,
+            "buildToolsVersion": "36.0.0"
           }
         }
       ],
@@ -59,7 +61,7 @@
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT"
       ],
-      "package": "com.yourname.museapp"
+      "package": "com.tianqing.museapp"
     },
     "web": {
       "favicon": "./assets/favicon.png"

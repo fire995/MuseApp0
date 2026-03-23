@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Modal, TextInput, FlatList, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Modal, TextInput, FlatList, Alert, Platform, PermissionsAndroid } from 'react-native';
 import * as DocumentPicker from '@react-native-documents/picker';
+// @ts-ignore
+import * as FileSystem from 'expo-file-system/legacy';
 import { useMuseDevice, MeditationTrack } from '../contexts/MuseDeviceContext';
 
 export default function MeditationDatabase() {
@@ -17,17 +19,60 @@ export default function MeditationDatabase() {
 
     const handlePickFile = async () => {
         try {
+            if (Platform.OS === 'android') {
+                // @ts-ignore
+                if (Platform.Version >= 33) {
+                    await PermissionsAndroid.request('android.permission.READ_MEDIA_AUDIO' as any);
+                } else {
+                    await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE);
+                }
+            }
+
             const results = await DocumentPicker.pick({
                 type: [DocumentPicker.types.audio],
+                mode: 'import'
             });
             if (results?.length > 0) {
-                setTempUri(results[0].uri);
-                setTrackName(results[0].name || '');
+                const res = results[0];
+                let finalUri = res.uri;
+
+                try {
+                    const copies = await DocumentPicker.keepLocalCopy({
+                        files: [{ uri: res.uri, fileName: res.name || `track_${Date.now()}.mp3` }],
+                        destination: 'documentDirectory'
+                    });
+                    if (copies[0].status === 'success') {
+                        finalUri = copies[0].localUri;
+                    } else if (copies[0].status === 'error') {
+                        throw new Error(copies[0].copyError || 'error');
+                    }
+                } catch (copyErr) {
+                    if (finalUri.startsWith('content://')) {
+                        try {
+                            const persistentUri = `${FileSystem.documentDirectory}${res.name || `track_${Date.now()}.mp3`}`;
+                            await FileSystem.copyAsync({ from: res.uri, to: persistentUri });
+                            finalUri = persistentUri;
+                        } catch (e) {
+                            console.error(e);
+                        }
+                    }
+                }
+
+                if (finalUri.startsWith('content://')) {
+                    Alert.alert('选择失败', '无法将文件复制到应用本地目录，请尝试将文件移动到其它文件夹再选择。');
+                    return;
+                }
+
+                setTempUri(finalUri);
+                setTrackName(res.name || '');
                 setModalVisible(true);
             }
         } catch (err: any) {
-            if (err?.code !== 'PICKER_CANCELLED') {
+            if (DocumentPicker.isErrorWithCode(err) && err.code === DocumentPicker.errorCodes.OPERATION_CANCELED) {
+                // cancelled
+            } else {
                 console.error(err);
+                Alert.alert('错误', '无法访问音频文件');
             }
         }
     };

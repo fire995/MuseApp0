@@ -22,7 +22,7 @@ import { SessionAnalyzer, AnalysisResults } from '../utils/SessionAnalyzer';
 if (!global.Buffer) { global.Buffer = Buffer; }
 ReactNativeForegroundService.register({ config: { alert: false, onServiceErrorCallBack: () => { } } });
 
-const bleManager = new BleManager();
+export const bleManager = new BleManager();
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 const MUSE_SERVICE = '0000fe8d-0000-1000-8000-00805f9b34fb';
@@ -60,6 +60,9 @@ interface MuseDeviceContextType {
     thetaWave: number[];
     isPlaying: boolean;
     musicName: string;
+    musicProgress: number;   // seconds
+    musicDuration: number;   // seconds
+    seekMusic: (sec: number) => Promise<void>;
     isSaving: boolean;
     savePath: string;
     saveDuration: number;
@@ -76,6 +79,10 @@ interface MuseDeviceContextType {
     autoSaveTempSize: number; // bytes, 当前临时文件夹总大小
     clearAutoSaveTempFiles: () => Promise<void>;
 
+    // 自定义持久化保存目录（SAF）
+    autoSaveDirectory: string | null;
+    pickAutoSaveDirectory: () => Promise<void>;
+
     // 冥想音乐数据库
     meditationTracks: MeditationTrack[];
     addMeditationTrack: (name: string, uri: string) => Promise<void>;
@@ -84,6 +91,9 @@ interface MuseDeviceContextType {
 
     // 分析结果
     latestAnalysis: AnalysisResults | null;
+    analysisHistory: AnalysisResults[];
+    clearAnalysisHistory: () => Promise<void>;
+    deleteHistoricalAnalysis: (timestamp: number) => Promise<void>;
 
     // Mind-Monitor OSC
     mindMonitorData: Record<string, any>;
@@ -138,6 +148,10 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
     const [isPlaying, setIsPlaying] = useState(false);
     const [musicName, setMusicName] = useState('未加载音乐');
+    const [musicProgress, setMusicProgress] = useState(0);
+    const [musicDuration, setMusicDuration] = useState(0);
+    const musicSoundRef = useRef<Audio.Sound | null>(null);
+    const musicProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const [isSaving, setIsSaving] = useState(false);
     const isSavingRef = useRef(false);
@@ -156,6 +170,23 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const autoSaveEnabledRef = useRef(true);
     const autoSaveIntervalSecRef = useRef(120);
     const autoSaveRetainDaysRef = useRef(7);
+
+    // 用户指定的持久化保存目录 Safari Storage Access Framework (SAF)
+    const [autoSaveDirectory, setAutoSaveDirectoryState] = useState<string | null>(null);
+    const autoSaveDirectoryRef = useRef<string | null>(null);
+
+    const pickAutoSaveDirectory = useCallback(async () => {
+        try {
+            const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+            if (permissions.granted) {
+                setAutoSaveDirectoryState(permissions.directoryUri);
+                autoSaveDirectoryRef.current = permissions.directoryUri;
+                await AsyncStorage.setItem('AUTO_SAVE_DIRECTORY', permissions.directoryUri);
+            }
+        } catch (e) {
+            Alert.alert('错误', '无法选择文件夹');
+        }
+    }, []);
 
     const logFileUri = useRef<string | null>(null);
     const saveStartTimeRef = useRef<number>(0);
@@ -201,6 +232,30 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const [sleepMusicSegments, setSleepMusicSegments] = useState<Array<{ startSec: number; endSec?: number }>>([]);
 
     const [latestAnalysis, setLatestAnalysis] = useState<AnalysisResults | null>(null);
+    const [analysisHistory, setAnalysisHistory] = useState<AnalysisResults[]>([]);
+
+    const addHistoricalAnalysis = useCallback(async (result: AnalysisResults) => {
+        // 自动带入当前播放的音乐名称
+        const finalResult = { ...result, trackName: musicName !== '未加载音乐' ? musicName : undefined };
+        setAnalysisHistory(prev => {
+            const newHistory = [finalResult, ...prev].slice(0, 100);
+            AsyncStorage.setItem('ANALYSIS_HISTORY', JSON.stringify(newHistory)).catch(() => { });
+            return newHistory;
+        });
+    }, [musicName]);
+
+    const deleteHistoricalAnalysis = useCallback(async (timestamp: number) => {
+        setAnalysisHistory(prev => {
+            const newHistory = prev.filter(h => h.timestamp !== timestamp);
+            AsyncStorage.setItem('ANALYSIS_HISTORY', JSON.stringify(newHistory)).catch(() => { });
+            return newHistory;
+        });
+    }, []);
+
+    const clearAnalysisHistory = useCallback(async () => {
+        setAnalysisHistory([]);
+        await AsyncStorage.removeItem('ANALYSIS_HISTORY');
+    }, []);
 
     // ---- 会话 Refs（供异步回调使用） ----
     const isSleepRecordModeRef = useRef(false);
@@ -258,24 +313,19 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     }, []);
 
     useEffect(() => {
-        const setupMusicPlayer = async () => {
+        const setupAudio = async () => {
             try {
-                await TrackPlayer.setupPlayer();
-                await TrackPlayer.updateOptions({
-                    android: { appKilledPlaybackBehavior: AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification },
-                    capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
+                await Audio.setAudioModeAsync({
+                    playsInSilentModeIOS: true,
+                    staysActiveInBackground: true,
+                    shouldDuckAndroid: false,
+                    playThroughEarpieceAndroid: false,
                 });
-                await TrackPlayer.setRepeatMode(RepeatMode.Track);
-
-                // 监听播放状态同步到 UI
-                TrackPlayer.addEventListener(Event.PlaybackState, (e) => {
-                    const s = e.state;
-                    if (s === State.Playing) setIsPlaying(true);
-                    else if (s === State.Paused || s === State.Stopped) setIsPlaying(false);
-                });
-            } catch { }
+            } catch (e) {
+                console.log('Audio mode setup failed:', e);
+            }
         };
-        setupMusicPlayer();
+        setupAudio();
 
         // 初始化本地文件系统
         (async () => {
@@ -328,8 +378,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             recalcTotalSignal();
         }, 1000);
 
-        // 启动 Mind-Monitor OSC 监听
-        setupMindMonitorListener();
+        // 启动 Mind-Monitor OSC 监听 (将由 mindMonitorEnabled 的 useEffect 处理)
+        // setupMindMonitorListener();
 
         return () => {
             if (heartbeat.current) clearInterval(heartbeat.current);
@@ -338,6 +388,8 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             if (dataQualityTimer.current) clearInterval(dataQualityTimer.current);
             if (meditationAccTimerRef.current) clearInterval(meditationAccTimerRef.current);
             if (sleepDurationTimerRef.current) clearInterval(sleepDurationTimerRef.current);
+            if (musicProgressTimerRef.current) clearInterval(musicProgressTimerRef.current);
+            if (musicSoundRef.current) musicSoundRef.current.unloadAsync().catch(() => { });
             if (mmSocketRef.current) {
                 try { mmSocketRef.current.close(); } catch (e) { }
             }
@@ -429,6 +481,11 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     };
 
     const setupMindMonitorListener = () => {
+        if (!mindMonitorEnabled) return;
+
+        // 如果已经有正在运作的 Socket，不要重复创建
+        if (mmSocketRef.current) return;
+
         const PORT = 5005;
         try {
             const socket = dgram.createSocket({ type: 'udp4' });
@@ -495,6 +552,10 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             socket.on('error', (err) => {
                 console.error('MindMonitor Socket Error:', err);
                 setIsMindMonitorActive(false);
+                // 发生错误时清理引用，允许下次重试
+                if (mmSocketRef.current === socket) {
+                    mmSocketRef.current = null;
+                }
             });
 
             socket.on('listening', () => {
@@ -506,6 +567,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             socket.bind(PORT, '0.0.0.0');
         } catch (e) {
             console.error('Failed to bind Mind-Monitor UDP socket:', e);
+            mmSocketRef.current = null;
         }
     };
 
@@ -543,11 +605,11 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
     const analyzeDrowsiness = async (thetaEnergy: number, alphaEnergy: number) => {
         const drowsinessScore = (thetaEnergy / (alphaEnergy + 1)) * 100;
-        if (drowsinessScore > 75 && isPlaying) {
+        if (drowsinessScore > 75 && isPlaying && musicSoundRef.current) {
             try {
-                const vol = await TrackPlayer.getVolume();
-                if (vol > 0.1) {
-                    await TrackPlayer.setVolume(Math.max(0.1, vol - 0.05));
+                const status = await musicSoundRef.current.getStatusAsync();
+                if (status.isLoaded && status.volume !== undefined && status.volume > 0.1) {
+                    await musicSoundRef.current.setVolumeAsync(Math.max(0.1, status.volume - 0.05));
                     addLog(`💤 调低音量并逐渐变弱...`);
                 }
             } catch (e) { }
@@ -610,26 +672,126 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         }
     };
 
+    // ── 辅助：启动进度轮询 ──────────────────────────────
+    const startProgressPolling = () => {
+        if (musicProgressTimerRef.current) clearInterval(musicProgressTimerRef.current);
+        musicProgressTimerRef.current = setInterval(async () => {
+            const snd = musicSoundRef.current;
+            if (!snd) return;
+            try {
+                const status = await snd.getStatusAsync();
+                if (status.isLoaded) {
+                    setMusicProgress((status.positionMillis ?? 0) / 1000);
+                    setMusicDuration((status.durationMillis ?? 0) / 1000);
+                    // 自动停止：播放结束
+                    if (status.didJustFinish) {
+                        setIsPlaying(false);
+                        setMusicProgress(0);
+                        if (musicProgressTimerRef.current) clearInterval(musicProgressTimerRef.current);
+                        _onMusicPaused();
+                    }
+                }
+            } catch { }
+        }, 500);
+    };
+
+    const loadAndPlayUri = async (uri: string, name: string) => {
+        try {
+            // 先停止并卸载旧的音频
+            if (musicSoundRef.current) {
+                try {
+                    await musicSoundRef.current.stopAsync();
+                    await musicSoundRef.current.unloadAsync();
+                } catch { }
+                musicSoundRef.current = null;
+            }
+            if (musicProgressTimerRef.current) clearInterval(musicProgressTimerRef.current);
+            setMusicProgress(0);
+            setMusicDuration(0);
+
+            const { sound, status } = await Audio.Sound.createAsync(
+                { uri },
+                { shouldPlay: true, volume: 1.0, isLooping: false }
+            );
+            musicSoundRef.current = sound;
+            setMusicName(name);
+            setIsPlaying(true);
+            if (status.isLoaded) {
+                setMusicDuration((status.durationMillis ?? 0) / 1000);
+            }
+            startProgressPolling();
+            _onMusicStarted();
+        } catch (e) {
+            console.error('loadAndPlayUri failed:', e);
+            Alert.alert('播放失败', `无法加载音频文件：${String(e)}`);
+        }
+    };
+
     const pickAndPlay = async () => {
         try {
-            const results = await DocumentPicker.pick({ type: [DocumentPicker.types.audio] });
+            // Android 13+ 需要额外权限
+            if (Platform.OS === 'android') {
+                // @ts-ignore
+                if (Platform.Version >= 33) {
+                    await PermissionsAndroid.request('android.permission.READ_MEDIA_AUDIO' as any);
+                } else {
+                    await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE);
+                }
+            }
+
+            const results = await DocumentPicker.pick({
+                type: [DocumentPicker.types.audio],
+                mode: 'import'
+            });
+
             if (results?.length > 0) {
                 const res = results[0];
-                await TrackPlayer.reset();
-                await TrackPlayer.add({ id: 'meditation', url: res.uri, title: res.name || '冥想音乐', artist: 'MuseApp' });
-                await TrackPlayer.setRepeatMode(RepeatMode.Off);
-                setMusicName(res.name || '已加载');
+                let finalUri = res.uri;
 
-                // 自动加入数据库
-                const exists = meditationTracks.find(t => t.uri === res.uri);
-                if (!exists) {
-                    await addMeditationTrack(res.name || '新音乐', res.uri);
+                // 使用 keepLocalCopy 将文件复制到应用持久目录下
+                try {
+                    const copies = await DocumentPicker.keepLocalCopy({
+                        files: [{ uri: res.uri, fileName: res.name || `track_${Date.now()}.mp3` }],
+                        destination: 'documentDirectory'
+                    });
+                    if (copies[0].status === 'success') {
+                        finalUri = copies[0].localUri;
+                    } else if (copies[0].status === 'error') {
+                        throw new Error(copies[0].copyError || 'keepLocalCopy failed with error status');
+                    }
+                } catch (copyErr) {
+                    console.warn('keepLocalCopy failed, attempting manual fallback:', copyErr);
+                    // 兜底补丁：手动通过 expo-file-system 拷贝
+                    if (finalUri.startsWith('content://')) {
+                        try {
+                            const persistentUri = `${FileSystem.documentDirectory}${res.name || `track_${Date.now()}.mp3`}`;
+                            await FileSystem.copyAsync({ from: res.uri, to: persistentUri });
+                            finalUri = persistentUri;
+                        } catch (manualErr) {
+                            console.error('Manual fallback copy also failed:', manualErr);
+                        }
+                    }
                 }
 
-                await TrackPlayer.play();
-                setIsPlaying(true);
+                // 自动加入数据库
+                if (finalUri.startsWith('content://')) {
+                    throw new Error('无法将文件复制到应用本地目录，您可能无法稍后再次播放该文件。请尝试将文件移动到其它文件夹再选择。');
+                }
+
+                const exists = meditationTracks.find(t => t.uri === finalUri);
+                if (!exists) {
+                    await addMeditationTrack(res.name || '新音乐', finalUri);
+                }
+                await loadAndPlayUri(finalUri, res.name || '冥想音乐');
             }
-        } catch (err) { }
+        } catch (err) {
+            if (DocumentPicker.isErrorWithCode(err) && err.code === DocumentPicker.errorCodes.OPERATION_CANCELED) {
+                console.log('User cancelled picker');
+            } else {
+                console.error('Pick error:', err);
+                Alert.alert('选择失败', '无法访问或复制音频文件。');
+            }
+        }
     };
 
     // 音乐播放状态变化时同步会话状态
@@ -669,30 +831,38 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
 
     const togglePlay = async () => {
         try {
+            const snd = musicSoundRef.current;
             if (isPlaying) {
-                await TrackPlayer.pause();
+                if (snd) await snd.pauseAsync();
                 setIsPlaying(false);
                 _onMusicPaused();
             } else {
-                // 如果当前没有轨道，不要尝试 play
-                const currentTrack = await TrackPlayer.getActiveTrack();
-                if (!currentTrack) {
+                if (!snd) {
                     Alert.alert('提示', '请先从数据库中选择一首音乐，或点击右上角上传音乐。');
                     return;
                 }
-
                 // 停止静音占位
                 if (silentSoundRef.current) {
                     await silentSoundRef.current.stopAsync();
                 }
-
-                await TrackPlayer.play();
+                await snd.setVolumeAsync(1.0);
+                await snd.playAsync();
                 setIsPlaying(true);
+                startProgressPolling();
                 _onMusicStarted();
             }
         } catch (e) {
             console.error('Toggle play failed:', e);
         }
+    };
+
+    const seekMusic = async (sec: number) => {
+        try {
+            if (musicSoundRef.current) {
+                await musicSoundRef.current.setPositionAsync(Math.round(sec * 1000));
+                setMusicProgress(sec);
+            }
+        } catch { }
     };
 
     const addMeditationTrack = async (name: string, uri: string) => {
@@ -716,22 +886,11 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     const playMeditationTrack = async (id: string) => {
         const track = meditationTracks.find(t => t.id === id);
         if (track) {
-            try {
-                await TrackPlayer.reset();
-                await TrackPlayer.add({
-                    id: track.id,
-                    url: track.uri,
-                    title: track.name,
-                    artist: 'MuseApp Library'
-                });
-                await TrackPlayer.setRepeatMode(RepeatMode.Off);
-                setMusicName(track.name);
-                await TrackPlayer.play();
-                setIsPlaying(true);
-                _onMusicStarted();
-            } catch (e) {
-                console.error('Play track failed:', e);
+            if (track.uri.startsWith('content://')) {
+                Alert.alert('播放失败', '该音频文件的访问权限已过期，请先从列表中删除它，然后重新添加。');
+                return;
             }
+            await loadAndPlayUri(track.uri, track.name);
         }
     };
 
@@ -768,13 +927,17 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             meditationAccTimerRef.current = null;
         }
         // 暂停音乐
-        try { await TrackPlayer.pause(); setIsPlaying(false); } catch { }
+        try {
+            if (musicSoundRef.current) await musicSoundRef.current.pauseAsync();
+            setIsPlaying(false);
+        } catch { }
         // 保存文件
         const totalSec = meditationAccumulatedSecRef.current;
         const mm = Math.floor(totalSec / 60).toString().padStart(2, '0');
         const ss = (totalSec % 60).toString().padStart(2, '0');
-        const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
-        const fileName = `meditation_${timeStr}.csv`;
+        const timeStr = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+        const trackSuffix = musicName !== '未加载音乐' ? `_${musicName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}` : '';
+        const fileName = `meditation_${timeStr}${trackSuffix}.csv`;
         const uri = `${FileSystem.documentDirectory}${fileName}`;
         const header = [
             '=== 冥想记录 ===',
@@ -785,13 +948,27 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         ].join('\n');
         const content = header + '\n' + (meditationDataBuffer.current || '(本次冥想无 Mind-Monitor 数据)\n');
         try {
-            await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
-
             // 执行分析
-            const results = await SessionAnalyzer.analyze(meditationDataBuffer.current, 'meditation');
+            const results = await SessionAnalyzer.analyze(meditationDataBuffer.current, 'meditation', totalSec);
             setLatestAnalysis(results);
+            await addHistoricalAnalysis(results);
 
-            await Sharing.shareAsync(uri, { dialogTitle: '保存冥想记录' });
+            const userDir = autoSaveDirectoryRef.current;
+            if (userDir) {
+                try {
+                    const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(userDir, fileName.replace('.csv', ''), 'text/csv');
+                    await FileSystem.StorageAccessFramework.writeAsStringAsync(fileUri, content, { encoding: FileSystem.EncodingType.UTF8 });
+                    Alert.alert('自动保存成功', `冥想记录已保存至您设置的目录:\n${fileName}`);
+                } catch (e) {
+                    console.error('SAF Save Error:', e);
+                    // 降级回内部目录并分享
+                    await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+                    await Sharing.shareAsync(uri, { dialogTitle: '保存冥想记录' });
+                }
+            } else {
+                await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+                await Sharing.shareAsync(uri, { dialogTitle: '保存冥想记录(未设置自动保存目录)' });
+            }
         } catch { Alert.alert('保存失败', '无法保存冥想记录文件'); }
         meditationDataBuffer.current = '';
         meditationAccumulatedSecRef.current = 0;
@@ -860,17 +1037,32 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             '='.repeat(50),
         ].join('\n');
         const content = header + '\n' + (sleepDataBuffer.current || '(本次无 Mind-Monitor 数据)\n');
-        const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
-        const uri = `${FileSystem.documentDirectory}sleep_record_${timeStr}.txt`;
+        const analysisType = totalSec < 3600 ? 'nap' : 'sleep';
+        const timeStr = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+        const trackSuffix = musicName !== '未加载音乐' ? `_${musicName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}` : '';
+        const fileName = `${analysisType}_record_${timeStr}${trackSuffix}.txt`;
+        const uri = `${FileSystem.documentDirectory}${fileName}`;
         try {
-            await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
-
             // 执行分析
-            const analysisType = totalSec < 3600 ? 'nap' : 'sleep';
-            const results = await SessionAnalyzer.analyze(sleepDataBuffer.current, analysisType);
+            const results = await SessionAnalyzer.analyze(sleepDataBuffer.current, analysisType, totalSec);
             setLatestAnalysis(results);
+            await addHistoricalAnalysis(results);
 
-            await Sharing.shareAsync(uri, { dialogTitle: '保存睡眠记录' });
+            const userDir = autoSaveDirectoryRef.current;
+            if (userDir) {
+                try {
+                    const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(userDir, `sleep_record_${timeStr}`, 'text/plain');
+                    await FileSystem.StorageAccessFramework.writeAsStringAsync(fileUri, content, { encoding: FileSystem.EncodingType.UTF8 });
+                    Alert.alert('自动保存成功', `睡眠记录已保存至您设置的目录:\nsleep_record_${timeStr}.txt`);
+                } catch (e) {
+                    console.error('SAF Save Error:', e);
+                    await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+                    await Sharing.shareAsync(uri, { dialogTitle: '保存睡眠记录' });
+                }
+            } else {
+                await FileSystem.writeAsStringAsync(uri, content, { encoding: FileSystem.EncodingType.UTF8 });
+                await Sharing.shareAsync(uri, { dialogTitle: '保存睡眠记录(未设置自动保存目录)' });
+            }
         } catch { Alert.alert('保存失败', '无法保存睡眠记录文件'); }
         sleepDataBuffer.current = '';
         sleepMusicSegmentsRef.current = [];
@@ -1090,11 +1282,18 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
         const state = await bleManager.state();
         if (state !== 'PoweredOn') { isConnecting.current = false; return; }
         if (Platform.OS === 'android') {
-            const g = await PermissionsAndroid.requestMultiple([
+            const permissionsToRequest = [
                 PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
                 PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
                 PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-            ]);
+            ];
+            // @ts-ignore
+            if (Platform.Version >= 33) {
+                permissionsToRequest.push('android.permission.READ_MEDIA_AUDIO' as any);
+            } else {
+                permissionsToRequest.push(PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE);
+            }
+            const g = await PermissionsAndroid.requestMultiple(permissionsToRequest);
             if (g['android.permission.BLUETOOTH_SCAN'] !== PermissionsAndroid.RESULTS.GRANTED) { isConnecting.current = false; return; }
         }
         bleManager.startDeviceScan(null, null, async (error, device) => {
@@ -1222,11 +1421,15 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const retain = await AsyncStorage.getItem('AUTO_SAVE_RETAIN_DAYS');
                 const tracks = await AsyncStorage.getItem('MEDITATION_TRACKS');
                 const mmEn = await AsyncStorage.getItem('MIND_MONITOR_ENABLED');
+                const autoSaveDir = await AsyncStorage.getItem('AUTO_SAVE_DIRECTORY');
+                const history = await AsyncStorage.getItem('ANALYSIS_HISTORY');
                 if (en !== null) { const v = JSON.parse(en); autoSaveEnabledRef.current = v; setAutoSaveEnabledState(v); }
                 if (interval !== null) { const v = JSON.parse(interval); autoSaveIntervalSecRef.current = v; setAutoSaveIntervalSecState(v); }
                 if (retain !== null) { const v = JSON.parse(retain); autoSaveRetainDaysRef.current = v; setAutoSaveRetainDaysState(v); }
                 if (tracks !== null) { setMeditationTracks(JSON.parse(tracks)); }
                 if (mmEn !== null) { setMindMonitorEnabledState(JSON.parse(mmEn)); }
+                if (autoSaveDir !== null) { setAutoSaveDirectoryState(autoSaveDir); autoSaveDirectoryRef.current = autoSaveDir; }
+                if (history !== null) { setAnalysisHistory(JSON.parse(history)); }
             } catch { }
             await refreshTempSize();
         })();
@@ -1235,11 +1438,12 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
     return (
         <MuseDeviceContext.Provider value={{
             battery, signalLevel, signalScore, electrodeQuality, packetsRx, samplingMode, savedDeviceId, thetaWave,
-            isPlaying, musicName, isSaving, savePath, saveDuration, heartRate, bloodOxygen, hrv,
+            isPlaying, musicName, musicProgress, musicDuration, seekMusic, isSaving, savePath, saveDuration, heartRate, bloodOxygen, hrv,
             autoSaveEnabled, setAutoSaveEnabled,
             autoSaveIntervalSec, setAutoSaveIntervalSec,
             autoSaveRetainDays, setAutoSaveRetainDays,
             autoSaveTempSize, clearAutoSaveTempFiles,
+            autoSaveDirectory, pickAutoSaveDirectory,
             mindMonitorData, mindMonitorLog, isMindMonitorActive, mindMonitorEnabled, setMindMonitorEnabled,
             meditationTracks, addMeditationTrack, removeMeditationTrack, playMeditationTrack,
             scanAndConnect, clearPairedDevice, toggleSave, exportSavedFile, pickAndPlay, togglePlay,
@@ -1249,7 +1453,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
             startMeditationSession, endMeditationSession,
             isSleepRecording, sleepRecordDuration, sleepMusicSegments,
             startSleepRecord, endSleepRecord,
-            latestAnalysis,
+            latestAnalysis, analysisHistory, clearAnalysisHistory, deleteHistoricalAnalysis,
         }}>
             {children}
         </MuseDeviceContext.Provider>
