@@ -32,10 +32,7 @@ const ATHENA_CHANNELS = ['273e0013', '273e0014', '273e0015', '273e0016']
 const PPG_CHANNELS = ['273e0010', '273e0011']
     .map(id => `${id}-4c4d-454d-96be-f03bac821358`);
 
-const CMD_HALT = 'AmgK';
-const CMD_PRESET_HI = 'BnAxMDM1Cg==';
-const CMD_PRESET_LO = 'BnAxMDM0Cg=='; // p1034, sleep mode
-const CMD_START = 'BmRjMDAxCg==';
+// 被动监听模式: 官方 App 接管控制，本 App 仅作为插件监听数据流
 const CMD_STATUS = 'AnMK';
 
 type SignalLevel = 'good' | 'ok' | 'poor' | 'none';
@@ -1147,7 +1144,7 @@ export const MuseDeviceProvider = ({ children }: { children: ReactNode }) => {
                 const timeStr = new Date().toISOString().replace(/[:.]/g, '-');
                 const fileName = `muse_data_${timeStr}.txt`;
                 const uri = `${FileSystem.documentDirectory}${fileName}`;
-                const header = `=== Muse EEG 数据记录 ===\n开始时间: ${new Date().toLocaleString()}\n采样频率: 被动跟随模式(官方App接管)\n格式: 时间 | ch=通道 | type=包类型 | Base64原始数据\n${'='.repeat(60)}\n`;
+                const header = `=== Muse 官方 APP 助手采集 ===\n开始时间: ${new Date().toLocaleString()}\n模式: 被动监听模式(官方App接管)\n格式: 时间 | ch=通道 | type=包类型 | Base64原始数据\n${'='.repeat(60)}\n`;
                 await FileSystem.writeAsStringAsync(uri, header, { encoding: FileSystem.EncodingType.UTF8 });
                 logFileUri.current = uri;
                 setSavePath(fileName);

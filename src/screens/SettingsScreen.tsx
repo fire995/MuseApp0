@@ -8,6 +8,7 @@ import { useRingConn } from '../contexts/RingConnContext';
 
 export default function SettingsScreen() {
     const {
+        savedDeviceId, scanAndConnect, clearPairedDevice,
         mindMonitorLog, isMindMonitorActive, mindMonitorEnabled, setMindMonitorEnabled,
         autoSaveDirectory, pickAutoSaveDirectory
     } = useMuseDevice();
@@ -38,25 +39,47 @@ export default function SettingsScreen() {
             </View>
 
             <View style={s.card}>
-                <Text style={s.cardTitle}>📂 数据导出与保存</Text>
-                <View style={[s.infoRow, { borderBottomWidth: 0 }]}>
-                    <View style={{ flex: 1 }}>
-                        <Text style={s.infoKey}>自动保存目录</Text>
-                        <Text style={{ fontSize: 10, color: '#555', marginTop: 4 }}>
-                            {autoSaveDirectory ? decodeURIComponent(autoSaveDirectory.split('%3A').pop() || '已设置自定义目录') : '未设置 (默认保存在应用内部)'}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <Text style={s.cardTitle}>🛰️ Muse 官方/插件助手模式 (被动监测)</Text>
+                    <View style={{
+                        paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4,
+                        backgroundColor: savedDeviceId ? '#4CAF5020' : '#333'
+                    }}>
+                        <Text style={{ fontSize: 10, color: savedDeviceId ? '#4CAF50' : '#888' }}>
+                            {savedDeviceId ? '已就绪' : '未监听'}
                         </Text>
                     </View>
-                    <TouchableOpacity
-                        style={{ backgroundColor: '#2A7DB5', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, justifyContent: 'center' }}
-                        onPress={pickAutoSaveDirectory}
-                    >
-                        <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>更改目录</Text>
-                    </TouchableOpacity>
                 </View>
-                <Text style={{ fontSize: 11, color: '#555', marginTop: 10, fontStyle: 'italic' }}>
-                    冥想或睡眠/休息会话结束后，系统将自动将记录保存至该文件夹，不会再弹出分享确认框。
-                </Text>
+
+                <View style={[s.infoRow, { borderBottomWidth: 0, paddingBottom: 12 }]}>
+                    <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 11, color: '#aaa', marginBottom: 6 }}>
+                            利用后台采集监控官方 APP 的脑波数据流。请确保官方 App 已连接并处于采集状态。
+                        </Text>
+                        {savedDeviceId && (
+                            <Text style={{ fontSize: 10, color: '#555' }}>监听设备: {savedDeviceId}</Text>
+                        )}
+                    </View>
+                    <View style={{ justifyContent: 'center', marginLeft: 12 }}>
+                        {!savedDeviceId ? (
+                            <TouchableOpacity
+                                style={{ backgroundColor: '#2A7DB5', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 }}
+                                onPress={scanAndConnect}
+                            >
+                                <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>开启监听</Text>
+                            </TouchableOpacity>
+                        ) : (
+                            <TouchableOpacity
+                                style={{ backgroundColor: '#FF5252', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 }}
+                                onPress={clearPairedDevice}
+                            >
+                                <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>停止</Text>
+                            </TouchableOpacity>
+                        )}
+                    </View>
+                </View>
             </View>
+
 
             <View style={s.card}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -94,14 +117,15 @@ export default function SettingsScreen() {
                 ) : (
                     <Text style={{ color: '#555', fontSize: 12, fontStyle: 'italic', marginBottom: 12 }}>监听已关闭，手动开启后可接收波形数据。</Text>
                 )}
+            </View>
 
-                <View style={{ backgroundColor: '#22253A', height: 1, marginVertical: 8 }} />
-
-                {/* RingConn 状态 */}
+            {/* RingConn 状态 */}
+            <View style={s.card}>
+                <Text style={s.cardTitle}>💍 RingConn 智能戒指</Text>
                 <View style={[s.infoRow, { borderBottomWidth: 0, paddingBottom: 12 }]}>
                     <View style={{ flex: 1 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                            <Text style={s.infoKey}>RingConn 智能戒指</Text>
+                            <Text style={s.infoKey}>连接状态</Text>
                             <View style={{
                                 marginLeft: 8, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
                                 backgroundColor: ringStatus === 'connected' ? '#4CAF5020' : '#333'
@@ -155,6 +179,27 @@ export default function SettingsScreen() {
                         )}
                     </View>
                 </View>
+            </View>
+
+            <View style={s.card}>
+                <Text style={s.cardTitle}>📂 数据导出与保存</Text>
+                <View style={[s.infoRow, { borderBottomWidth: 0 }]}>
+                    <View style={{ flex: 1 }}>
+                        <Text style={s.infoKey}>自动保存目录</Text>
+                        <Text style={{ fontSize: 10, color: '#555', marginTop: 4 }}>
+                            {autoSaveDirectory ? decodeURIComponent(autoSaveDirectory.split('%3A').pop() || '已设置自定义目录') : '未设置 (默认保存在应用内部)'}
+                        </Text>
+                    </View>
+                    <TouchableOpacity
+                        style={{ backgroundColor: '#2A7DB5', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, justifyContent: 'center' }}
+                        onPress={pickAutoSaveDirectory}
+                    >
+                        <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>更改目录</Text>
+                    </TouchableOpacity>
+                </View>
+                <Text style={{ fontSize: 11, color: '#555', marginTop: 10, fontStyle: 'italic' }}>
+                    冥想或睡眠/休息会话结束后，系统将自动将记录保存至该文件夹，不会再弹出分享确认框。
+                </Text>
             </View>
 
         </ScrollView>
